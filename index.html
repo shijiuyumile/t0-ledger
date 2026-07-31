@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>做T台账</title>
+  <meta name="description" content="A股散户做T买入成本台账：价格最相近核销、预估利润、做T战绩">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="做T台账">
+  <meta name="theme-color" content="#f5f6f8">
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <link rel="icon" type="image/png" href="icons/icon-180.png">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1 id="topTitle">买入成本台账</h1>
+  </header>
+
+  <main id="main">
+    <!-- 台账 -->
+    <section id="view-ledger" class="view">
+      <div class="summary-strip" id="ledgerSummary"></div>
+      <div class="toolbar">
+        <div class="seg" id="lotSortSeg">
+          <button data-sort="asc">价格从低到高</button>
+          <button data-sort="desc">价格从高到低</button>
+        </div>
+      </div>
+      <div id="ledgerList"></div>
+    </section>
+
+    <!-- 卖出记录 -->
+    <section id="view-sells" class="view" hidden>
+      <div class="summary-strip" id="sellSummary"></div>
+      <div class="toolbar">
+        <div class="seg" id="sellFilterSeg">
+          <button data-filter="loss">亏损卖出</button>
+          <button data-filter="win">做T成功</button>
+          <button data-filter="all">全部</button>
+        </div>
+      </div>
+      <div id="sellList"></div>
+    </section>
+
+    <!-- 战绩 -->
+    <section id="view-stats" class="view" hidden>
+      <div id="statsBody"></div>
+    </section>
+
+    <!-- 我的：导入、录入、备份、设置 -->
+    <section id="view-mine" class="view" hidden>
+      <div class="card">
+        <h2>导入交割单（Excel）</h2>
+        <p class="hint">支持每日增量导入，重复记录自动跳过。请从券商 APP/网上营业厅导出"交割单/对账单"的 .xlsx / .xls / .csv 文件。</p>
+        <label class="btn btn-primary file-btn">选择文件
+          <input type="file" id="fileInput" accept=".xlsx,.xls,.csv" hidden>
+        </label>
+        <div id="importResult" class="hint"></div>
+      </div>
+
+      <div class="card">
+        <h2>手动录入一笔成交</h2>
+        <form id="manualForm" class="form-grid">
+          <label>日期<input type="date" name="date" required></label>
+          <label>时间<input type="time" name="time" step="1"></label>
+          <label>代码<input type="text" name="code" inputmode="numeric" pattern="\d{5,6}" placeholder="510300" required></label>
+          <label>名称<input type="text" name="name" placeholder="选填"></label>
+          <label>方向
+            <select name="side"><option value="buy">买入</option><option value="sell">卖出</option></select>
+          </label>
+          <label>品种
+            <select name="secType"><option value="">自动识别</option><option value="stock">股票</option><option value="etf">ETF</option><option value="bond">债券</option></select>
+          </label>
+          <label>价格<input type="number" name="price" step="0.001" min="0.001" required></label>
+          <label>数量<input type="number" name="qty" step="1" min="1" required></label>
+          <button type="submit" class="btn btn-primary form-full">保存（费用按费率自动计算）</button>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2>费率设置</h2>
+        <div id="feeRulesBox"></div>
+      </div>
+
+      <div class="card">
+        <h2>数据备份</h2>
+        <p class="hint">数据只保存在本机浏览器里，换手机/清理浏览器前请先导出备份。</p>
+        <div class="btn-row">
+          <button class="btn" id="btnExport">导出 JSON 备份</button>
+          <label class="btn file-btn">恢复备份<input type="file" id="restoreInput" accept=".json" hidden></label>
+          <button class="btn btn-danger" id="btnClear">清空全部数据</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- 导入映射确认弹层 -->
+  <div id="importModal" class="modal" hidden>
+    <div class="modal-box">
+      <h2>确认字段对应关系</h2>
+      <p class="hint">已自动识别表头，如有误请手动调整。带 * 为必填。</p>
+      <div id="mappingGrid" class="form-grid"></div>
+      <div id="importPreview"></div>
+      <div class="btn-row">
+        <button class="btn" id="btnCancelImport">取消</button>
+        <button class="btn btn-primary" id="btnConfirmImport">确认导入</button>
+      </div>
+    </div>
+  </div>
+
+  <nav class="tabbar">
+    <button class="tab active" data-view="ledger"><span class="tab-ico">📒</span>台账</button>
+    <button class="tab" data-view="sells"><span class="tab-ico">🧾</span>卖出</button>
+    <button class="tab" data-view="stats"><span class="tab-ico">🏆</span>战绩</button>
+    <button class="tab" data-view="mine"><span class="tab-ico">⚙️</span>我的</button>
+  </nav>
+
+  <script src="vendor/xlsx.full.min.js"></script>
+  <script src="js/fees.js"></script>
+  <script src="js/match.js"></script>
+  <script src="js/store.js"></script>
+  <script src="js/import.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
