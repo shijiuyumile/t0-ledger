@@ -24,6 +24,7 @@ const Store = {
     if (!s.lotSort) s.lotSort = 'asc'; // 待做T买单排序：asc 从低到高 / desc 从高到低
     if (!s.feeRules) s.feeRules = JSON.parse(JSON.stringify(DEFAULT_FEE_RULES));
     if (!s.sellFilter) s.sellFilter = 'loss'; // 卖出记录默认只看"亏损卖出"，做T成功默认隐藏
+    if (!s.quotes) s.quotes = {}; // 各标的现价（手填，用于算浮盈）
     return this.data;
   },
 

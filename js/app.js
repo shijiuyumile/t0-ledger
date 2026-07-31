@@ -68,6 +68,65 @@ function displayName(code) {
   return name || code;
 }
 
+/** 会话内记住展开状态（刷新页面后默认折叠） */
+const uiOpen = { ledger: new Set(), sells: new Set() };
+
+/** 某标的：净持仓、待做T成本、浮盈、做T已实现 */
+function codeStats(code) {
+  let buyQty = 0, sellQty = 0, sumQty = 0, sumCost = 0, sumFee = 0, lotCount = 0;
+  let realized = 0, win = 0, loss = 0;
+  let secType = 'stock';
+
+  for (const t of Store.trades) {
+    if (t.code !== code) continue;
+    secType = t.secType || secType;
+    if (t.side === 'buy') {
+      buyQty += t.qty;
+      const lot = matchResult.lots.get(t.id);
+      if (lot && lot.remainingQty > 0) {
+        sumQty += lot.remainingQty;
+        sumCost += t.price * lot.remainingQty;
+        sumFee += totalFees(t.fees) * (lot.remainingQty / t.qty);
+        lotCount++;
+      }
+    } else {
+      sellQty += t.qty;
+      const r = matchResult.sells.get(t.id);
+      if (r && r.matchedQty > 0) {
+        realized += r.netPnl;
+        r.success ? win++ : loss++;
+      }
+    }
+  }
+
+  const holdQty = Math.max(0, buyQty - sellQty);
+  const avgCost = sumQty > 0 ? (sumCost + sumFee) / sumQty : 0;
+  const quote = Number(Store.settings.quotes[code]) || 0;
+  let floatPnl = null;
+  if (sumQty > 0 && quote > 0) {
+    const sellFees = calcFees(secType, 'sell', quote * sumQty, Store.settings.feeRules);
+    floatPnl = round2((quote - avgCost) * sumQty - totalFees(sellFees));
+  }
+  return {
+    holdQty, // 交割流水净持仓
+    tQty: sumQty, // 待做T剩余股数（有成本明细）
+    lotCount, avgCost, costAmt: round2(sumCost + sumFee),
+    floatPnl, realized: round2(realized), win, loss, secType, quote,
+  };
+}
+
+function bindGroupToggle(listSel, openSet) {
+  $$(listSel + ' .group-head').forEach((head) => {
+    head.addEventListener('click', (e) => {
+      if (e.target.closest('button, input, a, label')) return;
+      const group = head.closest('.group');
+      const code = group.dataset.code;
+      group.classList.toggle('open');
+      if (group.classList.contains('open')) openSet.add(code); else openSet.delete(code);
+    });
+  });
+}
+
 /* ---------- 标签页切换 ---------- */
 const VIEW_TITLES = { ledger: '买入成本台账', sells: '卖出记录', stats: '做T战绩', mine: '数据与设置' };
 
@@ -84,7 +143,6 @@ $$('.tabbar .tab').forEach((btn) => {
 
 /* ---------- 台账 ---------- */
 function renderLedger() {
-  // 汇总有剩余数量的买单，按代码分组
   const groups = new Map();
   for (const t of Store.trades) {
     if (t.side !== 'buy') continue;
@@ -120,28 +178,40 @@ function renderLedger() {
   const html = [];
   for (const code of Array.from(groups.keys()).sort()) {
     const arr = groups.get(code).sort((a, b) => (a.trade.price - b.trade.price) * dir);
-    const first = arr[0].trade;
-    let sumQty = 0, sumCost = 0, sumFee = 0;
-    for (const { trade, remainingQty } of arr) {
-      sumQty += remainingQty;
-      sumCost += trade.price * remainingQty;
-      sumFee += totalFees(trade.fees) * (remainingQty / trade.qty);
-    }
-    const avg = (sumCost + sumFee) / sumQty;
+    const st = codeStats(code);
+    const open = uiOpen.ledger.has(code) ? ' open' : '';
+    const floatText = st.floatPnl == null ? '填现价' : fmtSign(st.floatPnl);
+    const floatCls = st.floatPnl == null ? '' : pnlClass(st.floatPnl);
 
-    html.push(`<div class="group">
+    html.push(`<div class="group${open}" data-code="${esc(code)}">
       <div class="group-head">
-        <span class="g-name">${esc(displayName(code))}</span>
-        <span class="g-code">${esc(code)}</span>
-        <button class="badge" data-act="cycle-type" data-code="${esc(code)}">${SEC_TYPE_LABEL[first.secType] || '股票'}</button>
-        <div class="g-meta">${arr.length}笔 / ${fmt(sumQty, 0)}股<br>摊薄成本 ${fmt(avg, 3)}</div>
+        <div class="group-head-top">
+          <span class="chev">▶</span>
+          <span class="g-name">${esc(displayName(code))}</span>
+          <span class="g-code">${esc(code)}</span>
+          <button class="badge" data-act="cycle-type" data-code="${esc(code)}">${SEC_TYPE_LABEL[st.secType] || '股票'}</button>
+          <div class="g-meta">${st.lotCount}笔待做T<br>点开查看明细</div>
+        </div>
+        <div class="group-stats">
+          <div class="gs"><div class="v">${fmt(st.holdQty, 0)}</div><div class="k">持仓总量(股)</div></div>
+          <div class="gs"><div class="v">${st.tQty ? fmt(st.avgCost, 3) : '--'}</div><div class="k">摊薄成本</div></div>
+          <div class="gs"><div class="v float-v ${floatCls}" data-code="${esc(code)}">${floatText}</div><div class="k">目前盈亏</div></div>
+        </div>
+        <div class="group-quote">
+          <label>现价</label>
+          <input class="quote-input" type="number" step="0.001" min="0" data-code="${esc(code)}" value="${st.quote || ''}" placeholder="手填现价">
+          <span class="hint-inline">做T已实现 <span class="${pnlClass(st.realized)}">${fmtSign(st.realized)}</span></span>
+        </div>
       </div>
-      ${arr.map(({ trade, remainingQty }) => renderLot(trade, remainingQty)).join('')}
+      <div class="group-body">
+        ${arr.map(({ trade, remainingQty }) => renderLot(trade, remainingQty)).join('')}
+      </div>
     </div>`);
   }
   box.innerHTML = html.join('');
 
-  // 预估卖价输入：只局部刷新预计利润，避免打字时丢焦点
+  bindGroupToggle('#ledgerList', uiOpen.ledger);
+
   $$('#ledgerList .est-input').forEach((inp) => {
     inp.addEventListener('input', () => {
       const id = inp.dataset.id;
@@ -152,8 +222,27 @@ function renderLedger() {
       updateEstOut(inp.closest('.lot-est'), t, lot ? lot.remainingQty : 0);
     });
   });
+  $$('#ledgerList .quote-input').forEach((inp) => {
+    inp.addEventListener('click', (e) => e.stopPropagation());
+    inp.addEventListener('input', () => {
+      const code = inp.dataset.code;
+      const v = parseFloat(inp.value) || 0;
+      Store.settings.quotes[code] = v;
+      Store.save();
+      const st = codeStats(code);
+      const el = $(`.float-v[data-code="${code}"]`);
+      if (!el) return;
+      if (st.floatPnl == null) {
+        el.textContent = '填现价';
+        el.className = 'v float-v';
+      } else {
+        el.textContent = fmtSign(st.floatPnl);
+        el.className = 'v float-v ' + pnlClass(st.floatPnl);
+      }
+    });
+  });
   $$('#ledgerList [data-act="cycle-type"]').forEach((b) => {
-    b.addEventListener('click', () => cycleSecType(b.dataset.code));
+    b.addEventListener('click', (e) => { e.stopPropagation(); cycleSecType(b.dataset.code); });
   });
   $$('#ledgerList [data-act="del-trade"]').forEach((b) => {
     b.addEventListener('click', () => deleteTrade(b.dataset.id));
@@ -239,38 +328,83 @@ function renderSells() {
     box.innerHTML = `<div class="empty">${filter === 'loss' ? '没有亏损卖出，干得漂亮！' : '暂无记录'}</div>`;
     return;
   }
-  box.innerHTML = shown.map((s) => {
-    const r = matchResult.sells.get(s.id) || { pairs: [], matchedQty: 0, unmatchedQty: s.qty, netPnl: 0, sellFee: 0, buyFeeShare: 0 };
-    const tag = r.matchedQty === 0
-      ? '<span class="tag tag-warn">无买单可配</span>'
-      : r.success ? '<span class="tag tag-win">做T成功</span>' : '<span class="tag tag-loss">亏损卖出</span>';
-    const unmatched = r.unmatchedQty > 0 && r.matchedQty > 0
-      ? `<span class="tag tag-warn">${fmt(r.unmatchedQty, 0)}股未配对(底仓)</span>` : '';
-    return `<div class="sell-card">
-      <div class="sell-head">
-        <span class="s-name">${esc(displayName(s.code))}</span>
-        <span class="g-code">${esc(s.code)}</span>
-        ${tag}${unmatched}
-        <span class="s-date">${esc(s.date)} ${esc(s.time || '')}</span>
-      </div>
-      <div class="sell-main">
-        <span class="s-price">卖 ${fmt(s.price, 3)}</span>
-        <span class="lot-qty">× ${fmt(s.qty, 0)}股</span>
-        <span class="s-net ${pnlClass(r.netPnl)}">${r.matchedQty ? fmtSign(r.netPnl) : '--'}</span>
-      </div>
-      ${r.pairs.length ? `<div class="pairs">${r.pairs.map((p) => `
-        <div class="pair-row">
-          <span>配对买单 ${fmt(p.buyPrice, 3)} × ${fmt(p.qty, 0)}股（${esc(p.buyDate)}）</span>
-          <span class="p-pnl ${pnlClass((s.price - p.buyPrice) * p.qty)}">${fmtSign(round2((s.price - p.buyPrice) * p.qty))}</span>
-        </div>`).join('')}</div>` : ''}
-      <div class="sell-fees">卖出费用 ${feeText(s.fees)}，买入费用分摊 ${fmt(r.buyFeeShare)}</div>
-      <div class="lot-actions"><button class="btn btn-mini" data-act="del-trade" data-id="${s.id}">删除此笔</button></div>
-    </div>`;
-  }).join('');
 
+  const byCode = new Map();
+  for (const s of shown) {
+    if (!byCode.has(s.code)) byCode.set(s.code, []);
+    byCode.get(s.code).push(s);
+  }
+
+  const html = [];
+  for (const code of Array.from(byCode.keys()).sort()) {
+    const list = byCode.get(code);
+    let gNet = 0, gWin = 0, gLoss = 0;
+    for (const s of list) {
+      const r = matchResult.sells.get(s.id);
+      if (!r || r.matchedQty === 0) continue;
+      gNet += r.netPnl;
+      r.success ? gWin++ : gLoss++;
+    }
+    const st = codeStats(code);
+    const open = uiOpen.sells.has(code) ? ' open' : '';
+    const filterLabel = filter === 'win' ? '做T成功' : filter === 'loss' ? '亏损卖出' : '卖出';
+
+    html.push(`<div class="group${open}" data-code="${esc(code)}">
+      <div class="group-head">
+        <div class="group-head-top">
+          <span class="chev">▶</span>
+          <span class="g-name">${esc(displayName(code))}</span>
+          <span class="g-code">${esc(code)}</span>
+          <div class="g-meta">${list.length}笔${filterLabel}<br>点开查看明细</div>
+        </div>
+        <div class="group-stats">
+          <div class="gs"><div class="v">${fmt(st.holdQty, 0)}</div><div class="k">持仓总量(股)</div></div>
+          <div class="gs"><div class="v">${st.tQty ? fmt(st.avgCost, 3) : '--'}</div><div class="k">摊薄成本</div></div>
+          <div class="gs"><div class="v ${pnlClass(gNet)}">${fmtSign(round2(gNet))}</div><div class="k">本页净利</div></div>
+        </div>
+        <div class="group-quote">
+          <span>成功 <span class="c-up">${gWin}</span> · 亏损 <span class="c-down">${gLoss}</span></span>
+          <span class="hint-inline">做T累计 <span class="${pnlClass(st.realized)}">${fmtSign(st.realized)}</span></span>
+        </div>
+      </div>
+      <div class="group-body">
+        ${list.map((s) => renderSellCard(s)).join('')}
+      </div>
+    </div>`);
+  }
+  box.innerHTML = html.join('');
+
+  bindGroupToggle('#sellList', uiOpen.sells);
   $$('#sellList [data-act="del-trade"]').forEach((b) => {
     b.addEventListener('click', () => deleteTrade(b.dataset.id));
   });
+}
+
+function renderSellCard(s) {
+  const r = matchResult.sells.get(s.id) || { pairs: [], matchedQty: 0, unmatchedQty: s.qty, netPnl: 0, sellFee: 0, buyFeeShare: 0 };
+  const tag = r.matchedQty === 0
+    ? '<span class="tag tag-warn">无买单可配</span>'
+    : r.success ? '<span class="tag tag-win">做T成功</span>' : '<span class="tag tag-loss">亏损卖出</span>';
+  const unmatched = r.unmatchedQty > 0 && r.matchedQty > 0
+    ? `<span class="tag tag-warn">${fmt(r.unmatchedQty, 0)}股未配对(底仓)</span>` : '';
+  return `<div class="sell-card">
+    <div class="sell-head">
+      ${tag}${unmatched}
+      <span class="s-date">${esc(s.date)} ${esc(s.time || '')}</span>
+    </div>
+    <div class="sell-main">
+      <span class="s-price">卖 ${fmt(s.price, 3)}</span>
+      <span class="lot-qty">× ${fmt(s.qty, 0)}股</span>
+      <span class="s-net ${pnlClass(r.netPnl)}">${r.matchedQty ? fmtSign(r.netPnl) : '--'}</span>
+    </div>
+    ${r.pairs.length ? `<div class="pairs">${r.pairs.map((p) => `
+      <div class="pair-row">
+        <span>配对买单 ${fmt(p.buyPrice, 3)} × ${fmt(p.qty, 0)}股（${esc(p.buyDate)}）</span>
+        <span class="p-pnl ${pnlClass((s.price - p.buyPrice) * p.qty)}">${fmtSign(round2((s.price - p.buyPrice) * p.qty))}</span>
+      </div>`).join('')}</div>` : ''}
+    <div class="sell-fees">卖出费用 ${feeText(s.fees)}，买入费用分摊 ${fmt(r.buyFeeShare)}</div>
+    <div class="lot-actions"><button class="btn btn-mini" data-act="del-trade" data-id="${s.id}">删除此笔</button></div>
+  </div>`;
 }
 
 $$('#sellFilterSeg button').forEach((b) => {
