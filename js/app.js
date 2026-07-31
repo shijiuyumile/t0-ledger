@@ -92,8 +92,8 @@ function codeStats(code) {
     } else {
       sellQty += t.qty;
       const r = matchResult.sells.get(t.id);
-      if (r && r.matchedQty > 0) {
-        realized += r.netPnl;
+      if (r && r.isT) {
+        realized += r.tNetPnl;
         r.success ? win++ : loss++;
       }
     }
@@ -306,26 +306,27 @@ function renderSells() {
   let win = 0, loss = 0, net = 0;
   for (const s of all) {
     const r = matchResult.sells.get(s.id);
-    if (!r || r.matchedQty === 0) continue;
-    net += r.netPnl;
+    if (!r || !r.isT) continue;
+    net += r.tNetPnl;
     r.success ? win++ : loss++;
   }
   $('#sellSummary').innerHTML = `
-    <div class="sum-item"><div class="v ${pnlClass(net)}">${fmtSign(round2(net))}</div><div class="k">累计净利(元)</div></div>
+    <div class="sum-item"><div class="v ${pnlClass(net)}">${fmtSign(round2(net))}</div><div class="k">同日做T净利</div></div>
     <div class="sum-item"><div class="v c-up">${win}</div><div class="k">做T成功</div></div>
-    <div class="sum-item"><div class="v c-down">${loss}</div><div class="k">亏损卖出</div></div>`;
+    <div class="sum-item"><div class="v c-down">${loss}</div><div class="k">亏损做T</div></div>`;
 
   const shown = all.filter((s) => {
     const r = matchResult.sells.get(s.id);
     if (!r) return filter === 'all';
-    if (filter === 'win') return r.success;
-    if (filter === 'loss') return !r.success;
+    if (filter === 'win') return r.isT && r.success;
+    if (filter === 'loss') return r.isT && !r.success;
+    if (filter === 'pos') return r.isPosOnly || r.posMatchedQty > 0;
     return true;
   });
 
   const box = $('#sellList');
   if (!shown.length) {
-    box.innerHTML = `<div class="empty">${filter === 'loss' ? '没有亏损卖出，干得漂亮！' : '暂无记录'}</div>`;
+    box.innerHTML = `<div class="empty">${filter === 'loss' ? '没有亏损做T，干得漂亮！' : filter === 'pos' ? '没有跨日平仓记录' : '暂无记录'}</div>`;
     return;
   }
 
@@ -341,13 +342,19 @@ function renderSells() {
     let gNet = 0, gWin = 0, gLoss = 0;
     for (const s of list) {
       const r = matchResult.sells.get(s.id);
-      if (!r || r.matchedQty === 0) continue;
-      gNet += r.netPnl;
-      r.success ? gWin++ : gLoss++;
+      if (!r) continue;
+      if (filter === 'pos') {
+        gNet += r.posNetPnl || 0;
+      } else if (r.isT) {
+        gNet += r.tNetPnl;
+        r.success ? gWin++ : gLoss++;
+      } else if (filter === 'all' && r.posMatchedQty) {
+        gNet += r.posNetPnl || 0;
+      }
     }
     const st = codeStats(code);
     const open = uiOpen.sells.has(code) ? ' open' : '';
-    const filterLabel = filter === 'win' ? '做T成功' : filter === 'loss' ? '亏损卖出' : '卖出';
+    const filterLabel = filter === 'win' ? '做T成功' : filter === 'loss' ? '亏损做T' : filter === 'pos' ? '平仓' : '卖出';
 
     html.push(`<div class="group${open}" data-code="${esc(code)}">
       <div class="group-head">
@@ -381,12 +388,21 @@ function renderSells() {
 }
 
 function renderSellCard(s) {
-  const r = matchResult.sells.get(s.id) || { pairs: [], matchedQty: 0, unmatchedQty: s.qty, netPnl: 0, sellFee: 0, buyFeeShare: 0 };
-  const tag = r.matchedQty === 0
-    ? '<span class="tag tag-warn">无买单可配</span>'
-    : r.success ? '<span class="tag tag-win">做T成功</span>' : '<span class="tag tag-loss">亏损卖出</span>';
+  const r = matchResult.sells.get(s.id) || {
+    pairs: [], matchedQty: 0, unmatchedQty: s.qty, netPnl: 0, tNetPnl: 0, posNetPnl: 0,
+    sellFee: 0, buyFeeShare: 0, isT: false, isPosOnly: false, tMatchedQty: 0, posMatchedQty: 0,
+  };
+  let tag;
+  if (r.isT && r.success) tag = '<span class="tag tag-win">做T成功</span>';
+  else if (r.isT) tag = '<span class="tag tag-loss">亏损做T</span>';
+  else if (r.isPosOnly || r.posMatchedQty > 0) tag = '<span class="tag tag-warn">平仓兑现</span>';
+  else tag = '<span class="tag tag-warn">无买单可配</span>';
+
   const unmatched = r.unmatchedQty > 0 && r.matchedQty > 0
-    ? `<span class="tag tag-warn">${fmt(r.unmatchedQty, 0)}股未配对(底仓)</span>` : '';
+    ? `<span class="tag tag-warn">${fmt(r.unmatchedQty, 0)}股未配对</span>` : '';
+  const showNet = r.isT ? r.tNetPnl : r.posNetPnl;
+  const showNetLabel = r.isT ? '' : (r.posMatchedQty ? '（平仓）' : '');
+
   return `<div class="sell-card">
     <div class="sell-head">
       ${tag}${unmatched}
@@ -395,11 +411,11 @@ function renderSellCard(s) {
     <div class="sell-main">
       <span class="s-price">卖 ${fmt(s.price, 3)}</span>
       <span class="lot-qty">× ${fmt(s.qty, 0)}股</span>
-      <span class="s-net ${pnlClass(r.netPnl)}">${r.matchedQty ? fmtSign(r.netPnl) : '--'}</span>
+      <span class="s-net ${pnlClass(showNet)}">${r.matchedQty ? fmtSign(showNet) + showNetLabel : '--'}</span>
     </div>
     ${r.pairs.length ? `<div class="pairs">${r.pairs.map((p) => `
       <div class="pair-row">
-        <span>配对买单 ${fmt(p.buyPrice, 3)} × ${fmt(p.qty, 0)}股（${esc(p.buyDate)}）</span>
+        <span>${p.kind === 't' ? '同日做T' : '跨日平仓'} ${fmt(p.buyPrice, 3)} × ${fmt(p.qty, 0)}股（${esc(p.buyDate)}）</span>
         <span class="p-pnl ${pnlClass((s.price - p.buyPrice) * p.qty)}">${fmtSign(round2((s.price - p.buyPrice) * p.qty))}</span>
       </div>`).join('')}</div>` : ''}
     <div class="sell-fees">卖出费用 ${feeText(s.fees)}，买入费用分摊 ${fmt(r.buyFeeShare)}</div>
@@ -435,19 +451,19 @@ function renderStats() {
   for (const s of Store.trades) {
     if (s.side !== 'sell') continue;
     const r = matchResult.sells.get(s.id);
-    if (!r || r.matchedQty === 0) continue;
-    net += r.netPnl;
+    if (!r || !r.isT) continue;
+    net += r.tNetPnl;
     r.success ? win++ : loss++;
-    if (s.date === today) todayNet += r.netPnl;
+    if (s.date === today) todayNet += r.tNetPnl;
 
     const d = byDay.get(s.date) || { win: 0, loss: 0, net: 0 };
     r.success ? d.win++ : d.loss++;
-    d.net += r.netPnl;
+    d.net += r.tNetPnl;
     byDay.set(s.date, d);
 
     const c = byCode.get(s.code) || { win: 0, loss: 0, net: 0 };
     r.success ? c.win++ : c.loss++;
-    c.net += r.netPnl;
+    c.net += r.tNetPnl;
     byCode.set(s.code, c);
   }
 
@@ -464,20 +480,20 @@ function renderStats() {
 
   $('#statsBody').innerHTML = `
     <div class="stats-hero">
-      <div class="sum-item big"><div class="v ${pnlClass(net)}">${fmtSign(round2(net))}</div><div class="k">累计做T净利(元，已扣全部费用)</div></div>
+      <div class="sum-item big"><div class="v ${pnlClass(net)}">${fmtSign(round2(net))}</div><div class="k">同日做T累计净利(元，已扣费用；不含跨日底仓涨跌)</div></div>
       <div class="sum-item"><div class="v c-up">${win}</div><div class="k">做T成功(笔)</div></div>
-      <div class="sum-item"><div class="v c-down">${loss}</div><div class="k">亏损卖出(笔)</div></div>
+      <div class="sum-item"><div class="v c-down">${loss}</div><div class="k">亏损做T(笔)</div></div>
       <div class="sum-item"><div class="v">${rate}%</div><div class="k">成功率</div></div>
-      <div class="sum-item"><div class="v ${pnlClass(todayNet)}">${fmtSign(round2(todayNet))}</div><div class="k">今日净利</div></div>
+      <div class="sum-item"><div class="v ${pnlClass(todayNet)}">${fmtSign(round2(todayNet))}</div><div class="k">今日做T净利</div></div>
       <div class="sum-item big"><div class="v">${fmt(feeSum)}</div><div class="k">累计缴纳费用(元)</div></div>
     </div>
     ${total ? `
-    <div class="card"><h2>按日战绩</h2>
+    <div class="card"><h2>按日做T战绩</h2>
       <table class="stat-table"><tr><th>日期</th><th>成功</th><th>亏损</th><th>净利</th></tr>${dayRows}</table>
     </div>
-    <div class="card"><h2>按标的战绩</h2>
+    <div class="card"><h2>按标的做T战绩</h2>
       <table class="stat-table"><tr><th>标的</th><th>成功</th><th>亏损</th><th>净利</th></tr>${codeRows}</table>
-    </div>` : '<div class="empty">还没有已配对的卖出记录</div>'}`;
+    </div>` : '<div class="empty">还没有同日做T记录</div>'}`;
 }
 
 /* ---------- 我的：导入 ---------- */
