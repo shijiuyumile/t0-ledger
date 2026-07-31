@@ -72,20 +72,17 @@ const trades4 = [
 const r4 = computeMatches(trades4);
 const s4 = r4.sells.get(trades4[0].id);
 expect('场景4 配对数量', s4.matchedQty, 1000);
-expect('场景4 做T标记', s4.isT ? 1 : 0, 1);
 expect('场景4 毛利', s4.grossPnl, 100);
 
-// 场景4b：跨日卖出只记平仓，不计入做T
+// 场景4b：跨日卖出也算做T（不限同日）
 const trades4b = [
   Object.assign(mk('buy', 3.5, 1000, '09:31:00'), { date: '2026-07-30' }),
   Object.assign(mk('sell', 3.6, 1000, '10:00:00'), { date: '2026-07-31' }),
 ];
 const r4b = computeMatches(trades4b);
 const s4b = r4b.sells.get(trades4b[1].id);
-expect('场景4b 库存已核销', r4b.lots.get(trades4b[0].id).remainingQty, 0);
-expect('场景4b 不做T', s4b.isT ? 1 : 0, 0);
-expect('场景4b 平仓标记', s4b.isPosOnly ? 1 : 0, 1);
-expect('场景4b 做T净利为0', s4b.tNetPnl, 0);
+expect('场景4b 跨日也配对', s4b.matchedQty, 1000);
+expect('场景4b 做T成功', s4b.success ? 1 : 0, 1);
 
 // 场景5：无买单可配 -> 未配对
 const r5 = computeMatches([mk('sell', 3.6, 1000, '09:35:00')]);

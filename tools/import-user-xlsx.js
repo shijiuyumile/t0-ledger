@@ -1,4 +1,4 @@
-/* 解析用户对账单并导出为 seed JSON：node tools/import-user-xlsx.js <xlsx路径> */
+/* 解析用户对账单 → seed.json（成交 + 账户快照） */
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -19,28 +19,15 @@ if (!xlsxPath || !fs.existsSync(xlsxPath)) {
 }
 
 const buf = fs.readFileSync(xlsxPath);
-const { headers, rows, mapping } = parseWorkbook(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
-console.log('表头:', headers);
-console.log('映射:', mapping);
-console.log('数据行数:', rows.length);
+const wb = XLSX.read(buf, { type: 'buffer', cellDates: false });
+const grid = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: '' });
 
-const missing = ['date', 'code', 'side', 'price', 'qty'].filter((f) => mapping[f] == null);
-if (missing.length) {
-  console.error('缺少必填字段映射:', missing);
-  process.exit(1);
-}
-
+const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+const { headers, rows, mapping } = parseWorkbook(ab);
+console.log('成交表头映射', mapping);
 const { trades, skippedRows } = rowsToTrades(rows, mapping, DEFAULT_FEE_RULES);
-console.log('解析成交:', trades.length, '忽略行:', skippedRows);
+console.log('成交', trades.length, '忽略', skippedRows);
 
-// 统计买卖与代码
-const bySide = { buy: 0, sell: 0 };
-const codes = new Set();
-for (const t of trades) { bySide[t.side]++; codes.add(t.code); }
-console.log('买入', bySide.buy, '卖出', bySide.sell, '标的数', codes.size);
-console.log('日期范围', trades[0] && trades[0].date, '~', trades[trades.length - 1] && trades[trades.length - 1].date);
-
-// 赋 id/key（与 Store.addTrades 一致）
 const seen = new Map();
 function dedupKey(t, occ) {
   const base = t.seqNo
@@ -62,23 +49,75 @@ for (const t of trades) {
   t.seq = unique.length;
   unique.push(t);
 }
-console.log('去重后:', unique.length);
+
+// ---- 账户快照：资金、持仓、银证、股息 ----
+let cash = 0, totalAssets = 0;
+for (let i = 0; i < 20; i++) {
+  if (String(grid[i][0]).includes('资金余额')) cash = Number(grid[i][3]) || cash;
+  if (String(grid[i][0]).includes('资产总值')) totalAssets = Number(grid[i][3]) || totalAssets;
+}
+
+let deposit = 0, withdraw = 0, dividends = 0, interest = 0;
+for (let i = 0; i < grid.length; i++) {
+  const summary = String(grid[i][5] || '').replace(/\n/g, '');
+  const amt = Number(grid[i][11]) || 0;
+  if (summary === '银行转存') deposit += amt;
+  if (summary === '银行转取') withdraw += Math.abs(amt);
+  if (summary === '股息入帐') dividends += amt;
+  if (summary === '利息归本') interest += amt;
+}
+
+const holdings = [];
+const holdHead = grid.findIndex((r) => String(r[0]).includes('股票持仓'));
+if (holdHead >= 0) {
+  for (let i = holdHead + 1; i < grid.length; i++) {
+    const r = grid[i];
+    const code = String(r[3] || '').trim();
+    if (String(r[0]).includes('基金持仓') || String(r[0]).includes('配号')) break;
+    if (!/^\d{6}$/.test(code) || code === '888880') continue;
+    const qty = Number(r[6]) || 0;
+    const marketValue = Number(r[7]) || 0;
+    const costPrice = Number(r[9]) || 0;
+    const lastPrice = Number(r[10]) || 0;
+    const holdPnl = Number(r[11]) || 0;
+    const name = String(r[4] || '').replace(/\n/g, '');
+    if (qty <= 0) continue;
+    holdings.push({ code, name, qty, marketValue, costPrice, lastPrice, holdPnl });
+  }
+}
+
+const netDeposit = Math.round((deposit - withdraw) * 100) / 100;
+const account = {
+  asOf: '2026-07-30',
+  cash,
+  totalAssets,
+  deposit: Math.round(deposit * 100) / 100,
+  withdraw: Math.round(withdraw * 100) / 100,
+  netDeposit,
+  dividends: Math.round(dividends * 100) / 100,
+  interest: Math.round(interest * 100) / 100,
+  holdings,
+  quotes: {},
+};
+
+console.log('资产', totalAssets, '资金', cash, '净入金', netDeposit);
+console.log('持仓', holdings.length, '股息', dividends, '利息', interest);
+console.log('资产口径盈亏', Math.round((totalAssets - netDeposit) * 100) / 100);
+console.log('账单持仓盈亏合计', holdings.reduce((s, h) => s + h.holdPnl, 0));
 
 const seed = {
   version: 1,
   trades: unique,
+  account,
   settings: {
     lotSort: 'asc',
     sellFilter: 'loss',
     feeRules: DEFAULT_FEE_RULES,
+    quotes: {},
   },
 };
 
 const out = path.join(__dirname, '..', 'data', 'seed.json');
 fs.mkdirSync(path.dirname(out), { recursive: true });
 fs.writeFileSync(out, JSON.stringify(seed));
-console.log('已写入', out, '大小', (fs.statSync(out).size / 1024).toFixed(1), 'KB');
-
-// 顺便打印前3笔和后3笔核对
-console.log('前3笔:', unique.slice(0, 3).map((t) => `${t.date} ${t.code} ${t.side} ${t.price}x${t.qty}`));
-console.log('后3笔:', unique.slice(-3).map((t) => `${t.date} ${t.code} ${t.side} ${t.price}x${t.qty}`));
+console.log('已写入', out, (fs.statSync(out).size / 1024).toFixed(1), 'KB', '成交', unique.length);

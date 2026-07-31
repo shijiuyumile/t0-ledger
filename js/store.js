@@ -18,13 +18,14 @@ const Store = {
       this.data = null;
     }
     if (!this.data || !Array.isArray(this.data.trades)) {
-      this.data = { version: 1, trades: [], settings: {} };
+      this.data = { version: 1, trades: [], settings: {}, account: null };
     }
+    if (!this.data.account) this.data.account = null;
     const s = this.data.settings;
-    if (!s.lotSort) s.lotSort = 'asc'; // 待做T买单排序：asc 从低到高 / desc 从高到低
+    if (!s.lotSort) s.lotSort = 'asc';
     if (!s.feeRules) s.feeRules = JSON.parse(JSON.stringify(DEFAULT_FEE_RULES));
-    if (!s.sellFilter) s.sellFilter = 'loss'; // 卖出记录默认只看"亏损卖出"，做T成功默认隐藏
-    if (!s.quotes) s.quotes = {}; // 各标的现价（手填，用于算浮盈）
+    if (!s.sellFilter) s.sellFilter = 'loss';
+    if (!s.quotes) s.quotes = {};
     return this.data;
   },
 
@@ -39,6 +40,7 @@ const Store = {
 
   get trades() { return this.data.trades; },
   get settings() { return this.data.settings; },
+  get account() { return this.data.account; },
 
   /** 生成去重键：有成交编号用成交编号，否则用 日期+时间+代码+方向+价格+数量 */
   dedupKey(t, occurrence) {

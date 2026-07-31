@@ -1,13 +1,8 @@
 /**
- * 核销引擎：两阶段配对
- *
- * 阶段1（做T）：卖单只与「同一天」的剩余买单按价格最相近配对 → 计入做T战绩。
- * 阶段2（平仓）：同日配完后仍剩余的卖量，再与跨日买单核销 → 只扣减台账库存，
- *               盈亏记为「平仓兑现」，不计入做T成功/亏损（避免把底仓涨跌算成做T利润）。
- *
- * 同日价格最相近规则：
- *  优先 买价 <= 卖价 中买价最高者；否则 买价 > 卖价 中买价最低者；数量不等则级联。
- *  盈亏 = Σ(卖价−买价)×数量 − 卖费按比例 − 买费按比例。
+ * 核销引擎："价格最相近"配对（不限是否同日）。
+ * 卖单与同代码剩余买单配对：优先卖价之上最接近的买价，级联直至配完。
+ * 整笔卖单扣双边费用后净赚 => 做T成功；净亏 => 亏损卖出。
+ * 兼容同日先卖后买回。
  */
 'use strict';
 
@@ -15,10 +10,6 @@ function tradeTimeKey(t) {
   return (t.date || '') + ' ' + (t.time || '00:00:00');
 }
 
-/**
- * @param {Array} trades
- * @returns {{lots: Map, sells: Map}}
- */
 function computeMatches(trades) {
   const lots = new Map();
   const sells = new Map();
@@ -36,85 +27,50 @@ function computeMatches(trades) {
     .sort((a, b) => tradeTimeKey(a).localeCompare(tradeTimeKey(b)) || (a.seq || 0) - (b.seq || 0));
 
   for (const sell of sellTrades) {
-    const allBuys = buysByCode.get(sell.code) || [];
-    const sameDayBuys = allBuys.filter((b) => b.date === sell.date);
+    const candidates = buysByCode.get(sell.code) || [];
+    const pairs = [];
+    let remaining = sell.qty;
+    let grossPnl = 0;
+    let buyFeeShare = 0;
 
-    const tPart = allocateSell(sell, sameDayBuys, lots, sell.qty, 't');
-    const posPart = allocateSell(sell, allBuys, lots, tPart.leftover, 'pos');
+    while (remaining > 0) {
+      const pick = pickClosestBuy(sell.price, candidates, lots);
+      if (!pick) break;
+      const lot = lots.get(pick.id);
+      const q = Math.min(remaining, lot.remainingQty);
+      lot.remainingQty -= q;
+      lot.matchedQty += q;
+      lot.matches.push({ sellId: sell.id, qty: q, sellPrice: sell.price });
+      const share = totalFees(pick.fees) * (q / pick.qty);
+      buyFeeShare += share;
+      grossPnl += (sell.price - pick.price) * q;
+      pairs.push({ buyId: pick.id, qty: q, buyPrice: pick.price, buyDate: pick.date, buyFeeShare: round2(share) });
+      remaining -= q;
+    }
 
     const sellFeeAll = totalFees(sell.fees);
-    const tMatched = tPart.matchedQty;
-    const posMatched = posPart.matchedQty;
-    const matchedQty = tMatched + posMatched;
-    const unmatchedQty = sell.qty - matchedQty;
-
-    const tSellFee = matchedQty ? round2(sellFeeAll * (tMatched / sell.qty)) : 0;
-    const posSellFee = matchedQty ? round2(sellFeeAll * (posMatched / sell.qty)) : 0;
-    // 未配对部分费用不计入盈亏（底仓卖出无对应买单）
-
-    const tNetPnl = round2(tPart.grossPnl - tSellFee - tPart.buyFeeShare);
-    const posNetPnl = round2(posPart.grossPnl - posSellFee - posPart.buyFeeShare);
-
+    const matchedQty = sell.qty - remaining;
+    const sellFee = matchedQty === sell.qty ? sellFeeAll : round2(sellFeeAll * (matchedQty / sell.qty));
+    const netPnl = round2(grossPnl - sellFee - buyFeeShare);
     sells.set(sell.id, {
-      pairs: tPart.pairs.concat(posPart.pairs),
-      tPairs: tPart.pairs,
-      posPairs: posPart.pairs,
+      pairs,
       matchedQty,
-      tMatchedQty: tMatched,
-      posMatchedQty: posMatched,
-      unmatchedQty,
-      grossPnl: round2(tPart.grossPnl + posPart.grossPnl),
-      tGrossPnl: round2(tPart.grossPnl),
-      posGrossPnl: round2(posPart.grossPnl),
-      sellFee: round2(tSellFee + posSellFee),
-      buyFeeShare: round2(tPart.buyFeeShare + posPart.buyFeeShare),
-      // 战绩/筛选默认只用「同日做T」净利
-      netPnl: tNetPnl,
-      tNetPnl,
-      posNetPnl,
-      success: tMatched > 0 && tNetPnl > 0,
-      isT: tMatched > 0,
-      isPosOnly: tMatched === 0 && posMatched > 0,
+      unmatchedQty: remaining,
+      grossPnl: round2(grossPnl),
+      sellFee: round2(sellFee),
+      buyFeeShare: round2(buyFeeShare),
+      netPnl,
+      success: matchedQty > 0 && netPnl > 0,
+      isT: matchedQty > 0,
+      tNetPnl: netPnl,
+      tMatchedQty: matchedQty,
+      posMatchedQty: 0,
+      posNetPnl: 0,
+      isPosOnly: false,
     });
   }
 
   return { lots, sells };
-}
-
-function allocateSell(sell, candidates, lots, qtyLimit, kind) {
-  const pairs = [];
-  let remaining = qtyLimit;
-  let grossPnl = 0;
-  let buyFeeShare = 0;
-  if (remaining <= 0) {
-    return { pairs, matchedQty: 0, leftover: 0, grossPnl: 0, buyFeeShare: 0 };
-  }
-
-  while (remaining > 0) {
-    const pick = pickClosestBuy(sell.price, candidates, lots);
-    if (!pick) break;
-    const lot = lots.get(pick.id);
-    const q = Math.min(remaining, lot.remainingQty);
-    lot.remainingQty -= q;
-    lot.matchedQty += q;
-    lot.matches.push({ sellId: sell.id, qty: q, sellPrice: sell.price, kind });
-    const share = totalFees(pick.fees) * (q / pick.qty);
-    buyFeeShare += share;
-    grossPnl += (sell.price - pick.price) * q;
-    pairs.push({
-      buyId: pick.id, qty: q, buyPrice: pick.price, buyDate: pick.date,
-      buyFeeShare: round2(share), kind,
-    });
-    remaining -= q;
-  }
-
-  return {
-    pairs,
-    matchedQty: qtyLimit - remaining,
-    leftover: remaining,
-    grossPnl,
-    buyFeeShare,
-  };
 }
 
 function pickClosestBuy(sellPrice, candidates, lots) {
@@ -151,5 +107,56 @@ function estimateLotProfit(buyTrade, remainingQty, estPrice, feeRules) {
     sellFees,
     buyFeeShare: round2(buyFeeShare),
     net: round2(gross - sellFee - buyFeeShare),
+  };
+}
+
+/**
+ * 账户总盈亏（对齐券商常见口径）：
+ * 总盈亏 = 已实现盈亏(卖出配对净利) + 持仓浮动盈亏 + 股息 + 利息
+ * 浮动盈亏优先用对账单持仓盈亏；若用户填了现价则按现价重算。
+ */
+function computeAccountPnl(trades, matchResult, account) {
+  let realized = 0;
+  let realizedWin = 0;
+  let realizedLoss = 0;
+  for (const t of trades) {
+    if (t.side !== 'sell') continue;
+    const r = matchResult.sells.get(t.id);
+    if (!r || r.matchedQty === 0) continue;
+    realized += r.netPnl;
+    if (r.netPnl > 0) realizedWin += r.netPnl;
+    else realizedLoss += r.netPnl;
+  }
+
+  let floatPnl = 0;
+  const holdings = (account && account.holdings) || [];
+  for (const h of holdings) {
+    const quote = (account.quotes && account.quotes[h.code]) || h.lastPrice;
+    if (quote > 0 && h.qty > 0 && h.costPrice > 0) {
+      floatPnl += (quote - h.costPrice) * h.qty;
+    } else {
+      floatPnl += h.holdPnl || 0;
+    }
+  }
+  floatPnl = round2(floatPnl);
+  const dividends = (account && account.dividends) || 0;
+  const interest = (account && account.interest) || 0;
+  const total = round2(realized + floatPnl + dividends + interest);
+  const netDeposit = account ? account.netDeposit : null;
+  const totalAssets = account ? account.totalAssets : null;
+  const assetStyle = (totalAssets != null && netDeposit != null)
+    ? round2(totalAssets - netDeposit) : null;
+
+  return {
+    realized: round2(realized),
+    realizedWin: round2(realizedWin),
+    realizedLoss: round2(realizedLoss),
+    floatPnl,
+    dividends: round2(dividends),
+    interest: round2(interest),
+    total,
+    assetStyle,
+    totalAssets,
+    netDeposit,
   };
 }
