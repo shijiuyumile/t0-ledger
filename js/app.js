@@ -11,14 +11,14 @@ function recompute() {
   matchResult = computeMatches(Store.trades);
 }
 
-/** 首次打开且本地无数据时，自动拉取打包的历史对账单；已有成交但缺账户快照时补齐 */
+/** 拉取线上 seed：空库全量载入；已有数据则按 key 增量合并，并刷新较新的账户快照 */
 async function ensureSeed() {
   try {
-    if (Store.trades.length > 0 && Store.account) return;
     const res = await fetch('data/seed.json', { cache: 'no-cache' });
     if (!res.ok) return;
     const seed = await res.json();
     if (!seed || !Array.isArray(seed.trades)) return;
+
     if (Store.trades.length === 0) {
       Store.data = seed;
       if (!Store.data.settings) Store.data.settings = {};
@@ -26,12 +26,36 @@ async function ensureSeed() {
       if (!Store.data.settings.feeRules) Store.data.settings.feeRules = JSON.parse(JSON.stringify(DEFAULT_FEE_RULES));
       if (!Store.data.settings.sellFilter) Store.data.settings.sellFilter = 'loss';
       if (!Store.data.settings.quotes) Store.data.settings.quotes = {};
+      Store.data.seedRevision = seed.seedRevision || 1;
       Store.save();
       console.log('已载入历史对账单', Store.trades.length, '笔');
-    } else if (!Store.account && seed.account) {
-      Store.data.account = seed.account;
+      return;
+    }
+
+    // 增量合并成交
+    const existing = new Set(Store.trades.map((t) => t.key));
+    let added = 0;
+    for (const t of seed.trades) {
+      if (!t.key || existing.has(t.key)) continue;
+      existing.add(t.key);
+      Store.data.trades.push(t);
+      added++;
+    }
+
+    // 账户快照：seed 更新日期不早于本地时覆盖持仓/资产，资金类取 seed（已是累计）
+    const localAsOf = (Store.account && Store.account.asOf) || '';
+    const seedAsOf = (seed.account && seed.account.asOf) || '';
+    const localRev = Store.data.seedRevision || 0;
+    const seedRev = seed.seedRevision || 0;
+    if (seed.account && (seedRev > localRev || seedAsOf >= localAsOf)) {
+      const keepQuotes = (Store.account && Store.account.quotes) || Store.settings.quotes || {};
+      Store.data.account = Object.assign({}, seed.account, { quotes: keepQuotes });
+      Store.data.seedRevision = seedRev;
+    }
+
+    if (added > 0 || seedRev > localRev) {
       Store.save();
-      console.log('已补齐账户快照');
+      console.log('已增量合并', added, '笔，账户截至', Store.account && Store.account.asOf);
     }
   } catch (e) {
     console.error('载入历史数据失败（不影响手动导入）', e);
