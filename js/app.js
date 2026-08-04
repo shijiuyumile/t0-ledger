@@ -26,6 +26,7 @@ async function ensureSeed() {
       if (!Store.data.settings.feeRules) Store.data.settings.feeRules = JSON.parse(JSON.stringify(DEFAULT_FEE_RULES));
       if (!Store.data.settings.sellFilter) Store.data.settings.sellFilter = 'loss';
       if (!Store.data.settings.quotes) Store.data.settings.quotes = {};
+      if (Store.data.settings.showHiddenLots == null) Store.data.settings.showHiddenLots = false;
       Store.data.seedRevision = seed.seedRevision || 1;
       Store.save();
       console.log('已载入历史对账单', Store.trades.length, '笔');
@@ -191,35 +192,40 @@ $$('.tabbar .tab').forEach((btn) => {
 
 /* ---------- 台账 ---------- */
 function renderLedger() {
+  const showHidden = !!Store.settings.showHiddenLots;
   const groups = new Map();
+  let hiddenCount = 0;
   for (const t of Store.trades) {
     if (t.side !== 'buy') continue;
     const lot = matchResult.lots.get(t.id);
     if (!lot || lot.remainingQty <= 0) continue;
+    if (t.tHidden) {
+      hiddenCount++;
+      if (!showHidden) continue;
+    }
     if (!groups.has(t.code)) groups.set(t.code, []);
     groups.get(t.code).push({ trade: t, remainingQty: lot.remainingQty });
   }
 
-  let totalCost = 0;
   let totalLots = 0;
-  for (const arr of groups.values()) {
-    for (const { trade, remainingQty } of arr) {
-      totalCost += trade.price * remainingQty;
-      totalLots++;
-    }
-  }
+  for (const arr of groups.values()) totalLots += arr.length;
   const ap = accountPnl();
   $('#ledgerSummary').innerHTML = `
     <div class="sum-item"><div class="v ${pnlClass(ap.total)}">${fmtSign(ap.total)}</div><div class="k">账户总盈亏</div></div>
     <div class="sum-item"><div class="v">${groups.size}</div><div class="k">持仓标的</div></div>
-    <div class="sum-item"><div class="v">${totalLots}</div><div class="k">待做T买单</div></div>`;
+    <div class="sum-item"><div class="v">${totalLots}${hiddenCount && !showHidden ? `<span style="font-size:11px;font-weight:500;color:var(--text2)">/${hiddenCount}隐</span>` : ''}</div><div class="k">待做T买单</div></div>`;
+
+  const showHiddenEl = $('#showHiddenLots');
+  if (showHiddenEl) showHiddenEl.checked = showHidden;
 
   $$('#lotSortSeg button').forEach((b) =>
     b.classList.toggle('active', b.dataset.sort === Store.settings.lotSort));
 
   const box = $('#ledgerList');
   if (!groups.size) {
-    box.innerHTML = '<div class="empty">暂无待做T买单<br>去"我的"页导入交割单或手动录入</div>';
+    box.innerHTML = hiddenCount && !showHidden
+      ? `<div class="empty">待做T买单都已隐藏（${hiddenCount}笔）<br>打开上方「显示已隐藏」可查看或取消隐藏</div>`
+      : '<div class="empty">暂无待做T买单<br>去"我的"页导入交割单或手动录入</div>';
     return;
   }
 
@@ -231,6 +237,7 @@ function renderLedger() {
     const open = uiOpen.ledger.has(code) ? ' open' : '';
     const floatText = st.floatPnl == null ? '--' : fmtSign(st.floatPnl);
     const floatCls = st.floatPnl == null ? '' : pnlClass(st.floatPnl);
+    const hiddenInGroup = arr.filter((x) => x.trade.tHidden).length;
 
     html.push(`<div class="group${open}" data-code="${esc(code)}">
       <div class="group-head">
@@ -239,7 +246,7 @@ function renderLedger() {
           <span class="g-name">${esc(displayName(code))}</span>
           <span class="g-code">${esc(code)}</span>
           <button class="badge" data-act="cycle-type" data-code="${esc(code)}">${SEC_TYPE_LABEL[st.secType] || '股票'}</button>
-          <div class="g-meta">${st.lotCount}笔待做T<br>点开查看明细</div>
+          <div class="g-meta">${arr.length}笔待做T${hiddenInGroup ? `（隐${hiddenInGroup}）` : ''}<br>点开查看明细</div>
         </div>
         <div class="group-stats">
           <div class="gs"><div class="v">${fmt(st.holdQty, 0)}</div><div class="k">持仓总量</div></div>
@@ -301,11 +308,15 @@ function renderLedger() {
   $$('#ledgerList [data-act="del-trade"]').forEach((b) => {
     b.addEventListener('click', () => deleteTrade(b.dataset.id));
   });
+  $$('#ledgerList [data-act="toggle-hide"]').forEach((b) => {
+    b.addEventListener('click', () => toggleLotHidden(b.dataset.id));
+  });
 }
 
 function renderLot(t, remainingQty) {
   const partly = remainingQty < t.qty ? `（原${fmt(t.qty, 0)}股，已配对${fmt(t.qty - remainingQty, 0)}）` : '';
-  return `<div class="lot">
+  const hidden = !!t.tHidden;
+  return `<div class="lot${hidden ? ' lot-hidden' : ''}">
     <div class="lot-top">
       <span class="lot-price">${fmt(t.price, 3)}</span>
       <span class="lot-qty">${fmt(remainingQty, 0)}股${partly}</span>
@@ -317,8 +328,23 @@ function renderLot(t, remainingQty) {
       <input class="est-input" type="number" step="0.001" min="0" data-id="${t.id}" value="${t.estSell || ''}" placeholder="输入卖价">
       <div class="est-out"></div>
     </div>
-    <div class="lot-actions"><button class="btn btn-mini" data-act="del-trade" data-id="${t.id}">删除此笔</button></div>
+    <div class="lot-actions">
+      <button class="btn btn-mini btn-hide" data-act="toggle-hide" data-id="${t.id}">${hidden ? '取消隐藏' : '已做T隐藏'}</button>
+      <button class="btn btn-mini" data-act="del-trade" data-id="${t.id}">删除此笔</button>
+    </div>
   </div>`;
+}
+
+function toggleLotHidden(id) {
+  const t = Store.trades.find((x) => x.id === id);
+  if (!t || t.side !== 'buy') return;
+  Store.updateTrade(id, { tHidden: !t.tHidden });
+  renderLedger();
+  $$('#ledgerList .est-input').forEach((inp) => {
+    const tr = Store.trades.find((x) => x.id === inp.dataset.id);
+    const lot = matchResult.lots.get(inp.dataset.id);
+    if (tr && lot) updateEstOut(inp.closest('.lot-est'), tr, lot.remainingQty);
+  });
 }
 
 function updateEstOut(estBox, t, remainingQty) {
@@ -466,6 +492,20 @@ $$('#lotSortSeg button').forEach((b) => {
     renderLedger();
   });
 });
+
+const showHiddenEl = $('#showHiddenLots');
+if (showHiddenEl) {
+  showHiddenEl.addEventListener('change', () => {
+    Store.settings.showHiddenLots = !!showHiddenEl.checked;
+    Store.save();
+    renderLedger();
+    $$('#ledgerList .est-input').forEach((inp) => {
+      const tr = Store.trades.find((x) => x.id === inp.dataset.id);
+      const lot = matchResult.lots.get(inp.dataset.id);
+      if (tr && lot) updateEstOut(inp.closest('.lot-est'), tr, lot.remainingQty);
+    });
+  });
+}
 
 /* ---------- 战绩 ---------- */
 function renderStats() {

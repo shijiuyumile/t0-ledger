@@ -26,6 +26,7 @@ const Store = {
     if (!s.feeRules) s.feeRules = JSON.parse(JSON.stringify(DEFAULT_FEE_RULES));
     if (!s.sellFilter) s.sellFilter = 'loss';
     if (!s.quotes) s.quotes = {};
+    if (s.showHiddenLots == null) s.showHiddenLots = false;
     return this.data;
   },
 

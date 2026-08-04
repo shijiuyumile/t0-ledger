@@ -24,7 +24,11 @@
     <!-- 台账 -->
     <section id="view-ledger" class="view">
       <div class="summary-strip" id="ledgerSummary"></div>
-      <div class="toolbar">
+      <div class="toolbar toolbar-wrap">
+        <label class="toggle-row" id="showHiddenToggle">
+          <input type="checkbox" id="showHiddenLots">
+          <span>显示已隐藏</span>
+        </label>
         <div class="seg" id="lotSortSeg">
           <button data-sort="asc">价格从低到高</button>
           <button data-sort="desc">价格从高到低</button>
