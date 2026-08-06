@@ -1,7 +1,7 @@
 /* Service Worker：缓存应用外壳，实现离线可用。改动代码后需要更新 CACHE_VERSION。 */
 'use strict';
 
-const CACHE_VERSION = 't0ledger-v8';
+const CACHE_VERSION = 't0ledger-v9';
 const APP_SHELL = [
   './',
   './index.html',
