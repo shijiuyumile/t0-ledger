@@ -130,12 +130,17 @@ function computeAccountPnl(trades, matchResult, account) {
 
   let floatPnl = 0;
   const holdings = (account && account.holdings) || [];
-  for (const h of holdings) {
-    const quote = (account.quotes && account.quotes[h.code]) || h.lastPrice;
-    if (quote > 0 && h.qty > 0 && h.costPrice > 0) {
-      floatPnl += (quote - h.costPrice) * h.qty;
-    } else {
-      floatPnl += h.holdPnl || 0;
+  // 优先用对账单「持仓盈亏合计」（含已清仓但仍挂账的盈亏）
+  if (account && account.holdPnlTotal != null && !Number.isNaN(Number(account.holdPnlTotal))) {
+    floatPnl = Number(account.holdPnlTotal);
+  } else {
+    for (const h of holdings) {
+      const quote = (account.quotes && account.quotes[h.code]) || h.lastPrice;
+      if (quote > 0 && h.qty > 0 && h.costPrice > 0) {
+        floatPnl += (quote - h.costPrice) * h.qty;
+      } else {
+        floatPnl += h.holdPnl || 0;
+      }
     }
   }
   floatPnl = round2(floatPnl);

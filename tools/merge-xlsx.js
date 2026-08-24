@@ -46,7 +46,9 @@ function extractAccount(grid) {
       if (String(r[0]).includes('基金持仓') || String(r[0]).includes('配号')) break;
       if (!/^\d{6}$/.test(code) || code === '888880') continue;
       const qty = Number(r[6]) || 0;
-      if (qty <= 0) continue;
+      const holdPnl = Number(r[11]) || 0;
+      // 已清仓但仍有「持仓盈亏」的行（qty=0）也要保留，否则总盈亏少扣一块
+      if (qty <= 0 && Math.abs(holdPnl) < 0.005) continue;
       holdings.push({
         code,
         name: String(r[4] || '').replace(/\n/g, ''),
@@ -54,8 +56,20 @@ function extractAccount(grid) {
         marketValue: Number(r[7]) || 0,
         costPrice: Number(r[9]) || 0,
         lastPrice: Number(r[10]) || 0,
-        holdPnl: Number(r[11]) || 0,
+        holdPnl,
       });
+    }
+  }
+  // 账单「合计」行的持仓盈亏（最权威）
+  let holdPnlTotal = null;
+  for (let i = 0; i < grid.length; i++) {
+    if (String(grid[i][0]).includes('合计') && String(grid[i][1]).includes('人民币')) {
+      const v = Number(grid[i][11]);
+      if (!isNaN(v) && grid[i][11] !== '' && grid[i][11] != null) {
+        // 流水合计行也有「合计」，持仓合计通常市值在列7且较大
+        const mv = Number(grid[i][7]);
+        if (!isNaN(mv) && mv > 100) holdPnlTotal = v;
+      }
     }
   }
   return {
@@ -68,6 +82,7 @@ function extractAccount(grid) {
     dividends: round2(dividends),
     interest: round2(interest),
     holdings,
+    holdPnlTotal: holdPnlTotal == null ? null : round2(holdPnlTotal),
     quotes: {},
   };
 }
@@ -133,6 +148,7 @@ seed.account = {
   dividends: round2((oldAcc.dividends || 0) + periodAccount.dividends),
   interest: round2((oldAcc.interest || 0) + periodAccount.interest),
   holdings: periodAccount.holdings,
+  holdPnlTotal: periodAccount.holdPnlTotal,
   quotes: oldAcc.quotes || {},
 };
 seed.seedRevision = (seed.seedRevision || 1) + 1;
@@ -141,4 +157,4 @@ fs.writeFileSync(seedPath, JSON.stringify(seed));
 console.log('新增成交', added, '跳过重复', skipped, '忽略非成交', skippedRows);
 console.log('总成交', seed.trades.length, 'seedRevision', seed.seedRevision);
 console.log('账户截至', seed.account.asOf, '总资产', seed.account.totalAssets, '资金', seed.account.cash);
-console.log('持仓数', seed.account.holdings.length, '累计净入金', seed.account.netDeposit);
+console.log('持仓数', seed.account.holdings.length, '账单持仓盈亏合计', seed.account.holdPnlTotal, '累计净入金', seed.account.netDeposit);

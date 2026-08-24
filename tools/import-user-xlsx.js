@@ -81,8 +81,19 @@ if (holdHead >= 0) {
     const lastPrice = Number(r[10]) || 0;
     const holdPnl = Number(r[11]) || 0;
     const name = String(r[4] || '').replace(/\n/g, '');
-    if (qty <= 0) continue;
+    if (qty <= 0 && Math.abs(holdPnl) < 0.005) continue;
     holdings.push({ code, name, qty, marketValue, costPrice, lastPrice, holdPnl });
+  }
+}
+
+let holdPnlTotal = null;
+for (let i = 0; i < grid.length; i++) {
+  if (String(grid[i][0]).includes('合计') && String(grid[i][1]).includes('人民币')) {
+    const v = Number(grid[i][11]);
+    const mv = Number(grid[i][7]);
+    if (!isNaN(v) && grid[i][11] !== '' && grid[i][11] != null && !isNaN(mv) && mv > 100) {
+      holdPnlTotal = Math.round(v * 100) / 100;
+    }
   }
 }
 
@@ -97,13 +108,14 @@ const account = {
   dividends: Math.round(dividends * 100) / 100,
   interest: Math.round(interest * 100) / 100,
   holdings,
+  holdPnlTotal,
   quotes: {},
 };
 
 console.log('资产', totalAssets, '资金', cash, '净入金', netDeposit);
 console.log('持仓', holdings.length, '股息', dividends, '利息', interest);
 console.log('资产口径盈亏', Math.round((totalAssets - netDeposit) * 100) / 100);
-console.log('账单持仓盈亏合计', holdings.reduce((s, h) => s + h.holdPnl, 0));
+console.log('账单持仓盈亏合计', holdPnlTotal, '明细加总', holdings.reduce((s, h) => s + h.holdPnl, 0));
 
 const seed = {
   version: 1,

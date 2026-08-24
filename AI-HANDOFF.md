@@ -103,17 +103,25 @@ t0-ledger/
 cd "D:\我的cursor项目文件\t0-ledger"
 
 # 2）增量合并（自动去重、更新账户快照、seedRevision+1）
+#    ⚠ 同一份 xlsx 不要重复跑第二次：成交会去重，但银证转入/转出/股息会再累加一次！
 node tools/merge-xlsx.js "对账单xlsx的完整路径"
 
 # 3）把 sw.js 里 CACHE_VERSION 数字 +1
 #    例如 t0ledger-v11 → t0ledger-v12
-#    （仅改数据也应 bump，便于手机刷新到新 seed）
 
-# 4）提交并推送到 GitHub（触发 GitHub Pages）
+# 4）提交并推送到 GitHub
 git add data/seed.json sw.js
 git commit -m "增量合并 YYYY/MM/DD 对账单数据"
 git push origin main
 ```
+
+### 账户总盈亏为何可能和券商 APP 差一截
+
+本 APP：`已实现(价格最相近配对) + 持仓浮动 + 股息利息`。
+
+- **持仓浮动**必须用对账单「股票持仓」合计（含 **qty=0 但仍有持仓盈亏** 的已清仓行，例如某票清仓后仍挂着一笔亏损）。漏掉会把总盈亏抬高一千多。
+- 字段 `account.holdPnlTotal` = 账单合计行持仓盈亏；计算时优先用它。
+- 「已实现」与券商移动均价法不完全相同，所以和 APP 仍可能差几百，属口径差异；但不应再差一整块清仓盈亏。
 
 ### 合并脚本会做什么
 
