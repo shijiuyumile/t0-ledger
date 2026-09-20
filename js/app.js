@@ -7,6 +7,7 @@ Store.load();
 
 let fullMatchResult = { lots: new Map(), sells: new Map() };
 let matchResult = { lots: new Map(), sells: new Map() };
+let timeMatchResult = { lots: new Map(), sells: new Map(), pendingCovers: [] };
 
 function todayISO() {
   const d = new Date();
@@ -39,7 +40,18 @@ function resolveTFromDate(settings) {
   if (p === 'halfMonth') return addDaysISO(today, -14);
   if (p === 'month') return addDaysISO(today, -30);
   if (p === 'quarter') return addDaysISO(today, -90);
+  if (p === 'halfYear') return addDaysISO(today, -182);
+  if (p === 'year') return addDaysISO(today, -365);
+  if (p === 'sinceOpen') return earliestTradeDate();
   return today;
+}
+
+function earliestTradeDate() {
+  let min = '';
+  for (const t of Store.trades) {
+    if (t.date && (!min || t.date < min)) min = t.date;
+  }
+  return min || todayISO();
 }
 
 function isTWindowMode() {
@@ -50,18 +62,29 @@ function currentMatchMode() {
   return Store.settings.matchMode === 'time' ? 'time' : 'closest';
 }
 
+function currentLedgerPanel() {
+  const p = Store.settings.ledgerPanel;
+  if (p === 'covers' || p === 'breakeven') return p;
+  return 'lots';
+}
+
 function matchOpts(extra) {
   return Object.assign({ mode: currentMatchMode() }, extra || {});
 }
 
 function recompute() {
   fullMatchResult = computeMatches(Store.trades, matchOpts());
+  const fromDate = isTWindowMode() ? resolveTFromDate(Store.settings) : '';
   if (isTWindowMode()) {
-    const fromDate = resolveTFromDate(Store.settings);
     matchResult = computeMatches(Store.trades, matchOpts({ fromDate }));
   } else {
     matchResult = fullMatchResult;
   }
+  // 待回补子页始终按时间核销（与主列表口径可不同）
+  timeMatchResult = computeMatches(Store.trades, {
+    mode: 'time',
+    fromDate: fromDate || undefined,
+  });
 }
 
 /** 某标的历史累计做T已实现（始终用全历史配对口径） */
@@ -107,6 +130,7 @@ async function ensureSeed() {
       if (Store.data.settings.tFromDate == null) Store.data.settings.tFromDate = '';
       if (!Store.data.settings.unprofitableDisplay) Store.data.settings.unprofitableDisplay = 'tWindow';
       if (!Store.data.settings.matchMode) Store.data.settings.matchMode = 'closest';
+      if (!Store.data.settings.ledgerPanel) Store.data.settings.ledgerPanel = 'lots';
       if (!Array.isArray(Store.data.settings.watchPrices)) Store.data.settings.watchPrices = [];
       Store.data.seedRevision = seed.seedRevision || 1;
       Store.save();
@@ -250,7 +274,7 @@ function accountPnl() {
 }
 
 function pendingCoversForView() {
-  return (matchResult && matchResult.pendingCovers) || [];
+  return (timeMatchResult && timeMatchResult.pendingCovers) || [];
 }
 
 /** 参考价：手填 > 账单持仓 lastPrice > 最近成交价 */
@@ -285,11 +309,12 @@ function codeHasRemainingLongs(code) {
   return false;
 }
 
-/** 当前窗口核销里是否有底仓买单 */
+/** 当前窗口核销里是否有底仓买单（待回补提示用时间核销结果） */
 function codeHasBaseLots(code) {
+  const lots = (timeMatchResult && timeMatchResult.lots) || matchResult.lots;
   for (const t of Store.trades) {
     if (t.code !== code || t.side !== 'buy') continue;
-    const lot = matchResult.lots.get(t.id);
+    const lot = lots.get(t.id);
     if (lot && lot.isBase) return true;
   }
   return false;
@@ -421,20 +446,219 @@ function coverSecType(code, list) {
   return (t && t.secType) || guessSecType(code);
 }
 
-function renderCoverAndWatch() {
-  const coverBox = $('#coverList');
-  const watchBox = $('#watchList');
-  const helpBox = $('#matchHelpBox');
-  if (!coverBox || !watchBox) return;
+function lossSellsForBreakeven() {
+  const out = [];
+  for (const t of Store.trades) {
+    if (t.side !== 'sell') continue;
+    const r = fullMatchResult.sells.get(t.id);
+    if (r && r.matchedQty > 0 && r.netPnl < 0 && !r.isReverse) out.push(t);
+  }
+  out.sort((a, b) => tradeTimeKey(b).localeCompare(tradeTimeKey(a)));
+  return out;
+}
 
+function countBreakevenItems() {
+  return lossSellsForBreakeven().length + ((Store.settings.watchPrices || []).length);
+}
+
+function syncLedgerPanelUI() {
+  const panel = currentLedgerPanel();
+  $$('#ledgerPanelSeg button').forEach((b) => b.classList.toggle('active', b.dataset.panel === panel));
+  const covers = pendingCoversForView();
+  const coverN = covers.length;
+  const beN = countBreakevenItems();
+  // 待做T 数量在 renderLedger 里再写角标（依赖分组）
+  const cEl = $('#panelCountCovers');
+  if (cEl) cEl.textContent = coverN ? String(coverN) : '';
+  const bEl = $('#panelCountBreakeven');
+  if (bEl) bEl.textContent = beN ? String(beN) : '';
+
+  const toolbar = $('#ledgerToolbarLots');
+  const coverBox = $('#coverList');
+  const beBox = $('#breakevenList');
+  const lotBox = $('#ledgerList');
+  if (toolbar) toolbar.hidden = panel !== 'lots';
+  if (coverBox) coverBox.hidden = panel !== 'covers';
+  if (beBox) beBox.hidden = panel !== 'breakeven';
+  if (lotBox) lotBox.hidden = panel !== 'lots';
+}
+
+function renderCoverPanel() {
+  const coverBox = $('#coverList');
+  if (!coverBox) return;
+  const asOf = (Store.account && Store.account.asOf) || '';
+  const covers = pendingCoversForView();
+  const timeNote = currentMatchMode() !== 'time'
+    ? `<div class="hint cover-mode-note">本页按时间核销计算（与上方「价格匹配」主列表口径可不同）</div>`
+    : '';
+
+  if (!covers.length) {
+    coverBox.innerHTML = `<div class="section-label">待回补（倒T·先卖后买）</div>
+      ${timeNote}
+      <div class="hint">当前没有待回补。整体持仓统计全历史；做T时间则从起始日起。有先卖未买回会出现在这里。</div>`;
+    return;
+  }
+
+  const byCode = new Map();
+  for (const c of covers) {
+    if (!byCode.has(c.code)) byCode.set(c.code, []);
+    byCode.get(c.code).push(c);
+  }
+  const codes = Array.from(byCode.keys()).sort();
+  coverBox.innerHTML = `<div class="section-label">待回补（倒T·先卖后买）· ${covers.length} 笔${asOf ? ' · 账单截至 ' + esc(asOf) : ''}</div>
+    ${timeNote}
+    <div class="hint" style="margin-bottom:8px">每只标的一张卡；改「最新价」后倒T预估会全页更新。</div>` +
+    codes.map((code, idx) => {
+      const list = byCode.get(code);
+      const ref = refPriceForCode(code);
+      const secType = coverSecType(code, list);
+      const typeCls = 'group-' + (secType || 'stock');
+      const altCls = 'group-i' + (idx % 2);
+      const baseTip = (codeHasBaseLots(code) || codeHasRemainingLongs(code))
+        ? `<div class="cover-base-tip">窗口内无多头可配；你可能还有底仓/剩余多头，见整体持仓</div>`
+        : `<div class="cover-base-tip">窗口内无多头可配（先卖腿）</div>`;
+      return `<div class="group cover-card ${altCls} ${typeCls}" data-code="${esc(code)}">
+        <div class="group-head cover-card-head">
+          <div class="group-head-top">
+            <span class="g-name">${esc(displayName(code))}</span>
+            <span class="g-code">${esc(code)}</span>
+            <span class="badge">${SEC_TYPE_LABEL[secType] || '股票'}</span>
+            <div class="g-meta">${list.length}笔待回补</div>
+          </div>
+          <div class="group-quote cover-quote-bar">
+            ${refQuoteInputHtml(code)}
+          </div>
+          ${baseTip}
+        </div>
+        <div class="cover-card-body">
+        ${list.map((c) => {
+          const est = ref.price > 0 ? estimateCoverAtRef(c, ref.price) : null;
+          let advice = '';
+          let adviceCls = 'cover-advice';
+          if (!est) {
+            advice = '请在上方填写最新价，查看倒T预估';
+            adviceCls += ' cover-advice-muted';
+          } else if (ref.price < c.price) {
+            advice = `可考虑回补 · 按最新价回补预估倒T净利 ${fmtSign(est.net)}（毛利 ${fmtSign(est.gross)}，已扣费估算）`;
+            adviceCls += ' cover-advice-ok';
+          } else {
+            advice = `不宜回补 · 按最新价回补预估倒T净利 ${fmtSign(est.net)}`;
+            adviceCls += ' cover-advice-bad';
+          }
+          return `<div class="cover-row decision-row">
+            <span class="tag tag-warn">待回补</span>
+            <span class="lot-price">回补上限 ${fmt(c.price, 3)}</span>
+            <span class="lot-qty">${fmt(c.qty, 0)}股</span>
+            <span class="lot-date">${esc(c.date)} ${esc(c.time || '')}</span>
+            <div class="hint-inline">买回须低于上限才倒T盈利（费用另计）</div>
+            <div class="${adviceCls}">${advice}</div>
+          </div>`;
+        }).join('')}
+        </div>
+      </div>`;
+    }).join('');
+  bindRefQuoteInputs(coverBox);
+}
+
+function renderBreakevenPanel() {
+  const beBox = $('#breakevenList');
+  if (!beBox) return;
+  const losses = lossSellsForBreakeven();
+  const watches = Store.settings.watchPrices || [];
+
+  if (!losses.length && !watches.length) {
+    beBox.innerHTML = `<div class="section-label">待扳本</div>
+      <div class="hint">暂无已配对亏损卖出，也没有钉住的关注价。卖出页亏损单上的「扳本」可钉到这里。</div>`;
+    return;
+  }
+
+  const byCode = new Map();
+  for (const sell of losses) {
+    if (!byCode.has(sell.code)) byCode.set(sell.code, { sells: [], watches: [] });
+    byCode.get(sell.code).sells.push(sell);
+  }
+  for (const w of watches) {
+    if (!byCode.has(w.code)) byCode.set(w.code, { sells: [], watches: [] });
+    byCode.get(w.code).watches.push(w);
+  }
+  const codes = Array.from(byCode.keys()).sort();
+
+  beBox.innerHTML = `<div class="section-label">待扳本 · 亏损 ${losses.length} 笔${watches.length ? ' · 关注价 ' + watches.length : ''}</div>
+    <div class="hint" style="margin-bottom:8px">按标的分卡；亏损卖出的扳本决策 + 已钉关注价。改最新价会联动更新。</div>` +
+    codes.map((code, idx) => {
+      const g = byCode.get(code);
+      const secType = coverSecType(code, null);
+      const typeCls = 'group-' + (secType || 'stock');
+      const altCls = 'group-i' + (idx % 2);
+      const sellHtml = g.sells.map((sell) => {
+        const r = fullMatchResult.sells.get(sell.id);
+        const net = r ? r.netPnl : 0;
+        return `<div class="watch-row decision-row be-loss-row">
+          <span class="tag tag-loss">卖亏</span>
+          <span class="lot-price">${fmt(sell.price, 3)}</span>
+          <span class="lot-qty">${fmt(sell.qty, 0)}股</span>
+          <span class="lot-date">${esc(sell.date)} ${esc(sell.time || '')}</span>
+          <span class="lot-pnl ${pnlClass(net)}">${fmtSign(net)}</span>
+          ${breakevenHelpHtml(sell, net)}
+        </div>`;
+      }).join('');
+      const watchHtml = g.watches.map((w) => {
+        const sell = Store.trades.find((t) => t.id === w.fromSellId);
+        const r = (sell && fullMatchResult.sells.get(sell.id)) || null;
+        const net = r && r.matchedQty > 0 ? r.netPnl : (w.netPnl != null ? w.netPnl : null);
+        const beHtml = sell && net < 0 ? breakevenHelpHtml(sell, net) : '';
+        const ref = refPriceForCode(w.code);
+        const tip = ref.price > 0
+          ? (ref.price < w.price
+            ? `<span class="cover-advice-ok">最新价 ${fmt(ref.price, 3)} 低于关注卖价</span>`
+            : `<span class="cover-advice-bad">最新价 ${fmt(ref.price, 3)} 已不低于关注卖价</span>`)
+          : '';
+        return `<div class="watch-row" data-id="${esc(w.id)}">
+          <span class="tag tag-loss">关注卖价</span>
+          <span class="lot-price">${fmt(w.price, 3)}</span>
+          <span class="lot-date">${esc(w.date || '')}</span>
+          ${tip}
+          <button type="button" class="btn btn-mini" data-act="del-watch" data-id="${esc(w.id)}">移除</button>
+          ${beHtml}
+        </div>`;
+      }).join('');
+      return `<div class="group cover-card watch-card ${altCls} ${typeCls}" data-code="${esc(code)}">
+        <div class="group-head cover-card-head">
+          <div class="group-head-top">
+            <span class="g-name">${esc(displayName(code))}</span>
+            <span class="g-code">${esc(code)}</span>
+            <span class="badge">${SEC_TYPE_LABEL[secType] || '股票'}</span>
+            <div class="g-meta">${g.sells.length}笔亏损${g.watches.length ? ' · ' + g.watches.length + '关注' : ''}</div>
+          </div>
+          <div class="group-quote cover-quote-bar">${refQuoteInputHtml(code)}</div>
+        </div>
+        <div class="cover-card-body">
+          ${sellHtml}${watchHtml}
+        </div>
+      </div>`;
+    }).join('');
+
+  $$('#breakevenList [data-act="del-watch"]').forEach((b) => {
+    b.addEventListener('click', () => {
+      Store.settings.watchPrices = (Store.settings.watchPrices || []).filter((x) => x.id !== b.dataset.id);
+      Store.save();
+      renderAll();
+    });
+  });
+  bindRefQuoteInputs(beBox);
+}
+
+function renderCoverAndWatch() {
+  const helpBox = $('#matchHelpBox');
+  const panel = currentLedgerPanel();
   if (helpBox) {
-    if (currentMatchMode() === 'time') {
+    if (panel === 'covers' || panel === 'breakeven') {
       helpBox.hidden = false;
       helpBox.innerHTML = `<details class="match-help">
         <summary>待回补 / 扳本怎么区分？</summary>
         <ul>
           <li><b>待回补</b>：先卖、当时没有可配多头，等买回（倒T）。看回补上限与预估倒T净利。</li>
-          <li><b>卖亏扳本</b>：已经配对亏损的卖出。看「卖出」页亏损单上的「扳本」卡片，或钉到关注价。</li>
+          <li><b>卖亏扳本</b>：已经配对亏损的卖出。本页「待扳本」可直接看，也可钉关注价。</li>
           <li>两者不是同一张账；可以都看，但分开算。</li>
         </ul>
       </details>`;
@@ -443,138 +667,9 @@ function renderCoverAndWatch() {
       helpBox.innerHTML = '';
     }
   }
-
-  const asOf = (Store.account && Store.account.asOf) || '';
-  const covers = currentMatchMode() === 'time' ? pendingCoversForView() : [];
-  if (currentMatchMode() !== 'time') {
-    coverBox.hidden = true;
-    coverBox.innerHTML = '';
-  } else if (!covers.length) {
-    coverBox.hidden = false;
-    coverBox.innerHTML = `<div class="section-label">待回补（倒T·先卖后买）</div>
-      <div class="hint">当前没有待回补。整体持仓下也会统计全历史先卖未买回；有的话会出现在这里。</div>`;
-  } else {
-    coverBox.hidden = false;
-    const byCode = new Map();
-    for (const c of covers) {
-      if (!byCode.has(c.code)) byCode.set(c.code, []);
-      byCode.get(c.code).push(c);
-    }
-    const codes = Array.from(byCode.keys()).sort();
-    coverBox.innerHTML = `<div class="section-label">待回补（倒T·先卖后买）· ${covers.length} 笔${asOf ? ' · 账单截至 ' + esc(asOf) : ''}</div>
-      <div class="hint" style="margin-bottom:8px">每只标的一张卡；改「最新价」后倒T预估会全页更新。</div>` +
-      codes.map((code, idx) => {
-        const list = byCode.get(code);
-        const ref = refPriceForCode(code);
-        const secType = coverSecType(code, list);
-        const typeCls = 'group-' + (secType || 'stock');
-        const altCls = 'group-i' + (idx % 2);
-        const baseTip = (codeHasBaseLots(code) || codeHasRemainingLongs(code))
-          ? `<div class="cover-base-tip">窗口内无多头可配；你可能还有底仓/剩余多头，见整体持仓</div>`
-          : `<div class="cover-base-tip">窗口内无多头可配（先卖腿）</div>`;
-        return `<div class="group cover-card ${altCls} ${typeCls}" data-code="${esc(code)}">
-          <div class="group-head cover-card-head">
-            <div class="group-head-top">
-              <span class="g-name">${esc(displayName(code))}</span>
-              <span class="g-code">${esc(code)}</span>
-              <span class="badge">${SEC_TYPE_LABEL[secType] || '股票'}</span>
-              <div class="g-meta">${list.length}笔待回补</div>
-            </div>
-            <div class="group-quote cover-quote-bar">
-              ${refQuoteInputHtml(code)}
-            </div>
-            ${baseTip}
-          </div>
-          <div class="cover-card-body">
-          ${list.map((c) => {
-            const est = ref.price > 0 ? estimateCoverAtRef(c, ref.price) : null;
-            let advice = '';
-            let adviceCls = 'cover-advice';
-            if (!est) {
-              advice = '请在上方填写最新价，查看倒T预估';
-              adviceCls += ' cover-advice-muted';
-            } else if (ref.price < c.price) {
-              advice = `可考虑回补 · 按最新价回补预估倒T净利 ${fmtSign(est.net)}（毛利 ${fmtSign(est.gross)}，已扣费估算）`;
-              adviceCls += ' cover-advice-ok';
-            } else {
-              advice = `不宜回补 · 按最新价回补预估倒T净利 ${fmtSign(est.net)}`;
-              adviceCls += ' cover-advice-bad';
-            }
-            return `<div class="cover-row decision-row">
-              <span class="tag tag-warn">待回补</span>
-              <span class="lot-price">回补上限 ${fmt(c.price, 3)}</span>
-              <span class="lot-qty">${fmt(c.qty, 0)}股</span>
-              <span class="lot-date">${esc(c.date)} ${esc(c.time || '')}</span>
-              <div class="hint-inline">买回须低于上限才倒T盈利（费用另计）</div>
-              <div class="${adviceCls}">${advice}</div>
-            </div>`;
-          }).join('')}
-          </div>
-        </div>`;
-      }).join('');
-    bindRefQuoteInputs(coverBox);
-  }
-
-  const watches = Store.settings.watchPrices || [];
-  if (!watches.length) {
-    watchBox.hidden = true;
-    watchBox.innerHTML = '';
-  } else {
-    watchBox.hidden = false;
-    const byCode = new Map();
-    watches.forEach((w) => {
-      if (!byCode.has(w.code)) byCode.set(w.code, []);
-      byCode.get(w.code).push(w);
-    });
-    const wCodes = Array.from(byCode.keys()).sort();
-    watchBox.innerHTML = `<div class="section-label">扳本关注价 · ${watches.length}</div>` +
-      wCodes.map((code, idx) => {
-        const list = byCode.get(code);
-        const secType = coverSecType(code, null);
-        const typeCls = 'group-' + (secType || 'stock');
-        const altCls = 'group-i' + (idx % 2);
-        return `<div class="group cover-card watch-card ${altCls} ${typeCls}" data-code="${esc(code)}">
-          <div class="group-head cover-card-head">
-            <div class="group-head-top">
-              <span class="g-name">${esc(displayName(code))}</span>
-              <span class="g-code">${esc(code)}</span>
-              <span class="badge">${SEC_TYPE_LABEL[secType] || '股票'}</span>
-            </div>
-            <div class="group-quote cover-quote-bar">${refQuoteInputHtml(code)}</div>
-          </div>
-          <div class="cover-card-body">
-          ${list.map((w) => {
-            const sell = Store.trades.find((t) => t.id === w.fromSellId);
-            const r = (sell && (fullMatchResult.sells.get(sell.id) || matchResult.sells.get(sell.id))) || null;
-            const net = r && r.matchedQty > 0 ? r.netPnl : (w.netPnl != null ? w.netPnl : null);
-            const beHtml = sell && net < 0 ? breakevenHelpHtml(sell, net) : '';
-            const ref = refPriceForCode(w.code);
-            const tip = ref.price > 0
-              ? (ref.price < w.price
-                ? `<span class="cover-advice-ok">最新价 ${fmt(ref.price, 3)} 低于关注卖价</span>`
-                : `<span class="cover-advice-bad">最新价 ${fmt(ref.price, 3)} 已不低于关注卖价</span>`)
-              : '';
-            return `<div class="watch-row" data-id="${esc(w.id)}">
-              <span class="tag tag-loss">关注卖价</span>
-              <span class="lot-price">${fmt(w.price, 3)}</span>
-              <span class="lot-date">${esc(w.date || '')}</span>
-              ${tip}
-              <button type="button" class="btn btn-mini" data-act="del-watch" data-id="${esc(w.id)}">移除</button>
-              ${beHtml}
-            </div>`;
-          }).join('')}
-          </div>
-        </div>`;
-      }).join('');
-    $$('#watchList [data-act="del-watch"]').forEach((b) => {
-      b.addEventListener('click', () => {
-        Store.settings.watchPrices = (Store.settings.watchPrices || []).filter((x) => x.id !== b.dataset.id);
-        Store.save();
-        renderAll();
-      });
-    });
-    bindRefQuoteInputs(watchBox);
-  }
+  syncLedgerPanelUI();
+  if (panel === 'covers') renderCoverPanel();
+  else if (panel === 'breakeven') renderBreakevenPanel();
 }
 
 function bindGroupToggle(listSel, openSet) {
@@ -658,6 +753,8 @@ function renderLedger() {
 
   let totalLots = 0;
   for (const arr of groups.values()) totalLots += arr.length;
+  const lotsCountEl = $('#panelCountLots');
+  if (lotsCountEl) lotsCountEl.textContent = totalLots ? String(totalLots) : '';
   const ap = accountPnl();
   const modeLabel = tMode ? '做T时间' : '整体持仓';
   $('#ledgerSummary').innerHTML = `
@@ -672,6 +769,10 @@ function renderLedger() {
     b.classList.toggle('active', b.dataset.sort === Store.settings.lotSort));
 
   const box = $('#ledgerList');
+  if (currentLedgerPanel() !== 'lots') {
+    // 子页非待做T时仍算好角标，列表由 syncLedgerPanelUI 隐藏
+    return;
+  }
   if (!groups.size) {
     box.innerHTML = hiddenCount && !showHidden
       ? `<div class="empty">待做T买单都已隐藏（${hiddenCount}笔）<br>打开上方「显示已隐藏」可查看或取消隐藏</div>`
@@ -1049,6 +1150,13 @@ $$('#ledgerMatchModeSeg button').forEach((b) => {
     syncMatchModeUI();
   });
 });
+$$('#ledgerPanelSeg button').forEach((b) => {
+  b.addEventListener('click', () => {
+    Store.settings.ledgerPanel = b.dataset.panel;
+    Store.save();
+    renderAll();
+  });
+});
 function syncMatchModeUI() {
   const mode = currentMatchMode();
   $$('#matchModeSeg button').forEach((b) => b.classList.toggle('active', b.dataset.mode === mode));
@@ -1056,14 +1164,14 @@ function syncMatchModeUI() {
   const hint = $('#matchModeHint');
   if (hint) {
     hint.textContent = mode === 'time'
-      ? '当前：时间顺序。台账会显示「待回补」；对照账单参考价判断是否可回补。默认可随时切回价格最相近。'
-      : '当前：价格最相近（与 v1.0 稳定版习惯一致）。';
+      ? '当前：时间顺序。待回补见台账「待回补」子页；对照账单参考价判断是否可回补。默认可随时切回价格最相近。'
+      : '当前：价格最相近（与 v1.0 稳定版习惯一致）。待回补仍可在台账「待回补」子页按时间核销查看。';
   }
   const ledgerHint = $('#ledgerMatchHint');
   if (ledgerHint) {
     ledgerHint.textContent = mode === 'time'
-      ? '已开「时间+待回补」：整体持仓无需再设做T时间也会看待回补；参考价来自最近对账单（非实时）。'
-      : '默认价格匹配。要点看待回补：点「时间+待回补」即可（可留在整体持仓）。';
+      ? '已开「时间+待回补」：卖出配对按时间顺序。待回补/待扳本用上方子页切换，不必堆在列表顶。'
+      : '默认价格匹配。待回补请点「待回补」子页（本页按时间核销，与主列表可不同）。';
   }
 }
 const tFromDateInput = $('#tFromDateInput');

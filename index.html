@@ -33,6 +33,11 @@
           <button type="button" data-mode="closest">价格匹配</button>
           <button type="button" data-mode="time">时间+待回补</button>
         </div>
+        <div class="seg seg-wrap" id="ledgerPanelSeg">
+          <button type="button" data-panel="lots">待做T <span class="panel-count" id="panelCountLots"></span></button>
+          <button type="button" data-panel="covers">待回补 <span class="panel-count" id="panelCountCovers"></span></button>
+          <button type="button" data-panel="breakeven">待扳本 <span class="panel-count" id="panelCountBreakeven"></span></button>
+        </div>
         <p class="hint mode-hint" id="ledgerMatchHint"></p>
         <div id="matchHelpBox" class="match-help-box" hidden></div>
         <div id="tWindowControls" class="t-window-controls" hidden>
@@ -45,6 +50,9 @@
             <button type="button" data-preset="halfMonth">近半月</button>
             <button type="button" data-preset="month">近1月</button>
             <button type="button" data-preset="quarter">近3月</button>
+            <button type="button" data-preset="halfYear">近半年</button>
+            <button type="button" data-preset="year">近1年</button>
+            <button type="button" data-preset="sinceOpen">自开户以来</button>
             <button type="button" data-preset="custom">自选日期</button>
           </div>
           <label class="date-row" id="tFromDateRow">
@@ -58,7 +66,7 @@
           <p class="hint mode-hint" id="tWindowHint"></p>
         </div>
       </div>
-      <div class="toolbar toolbar-wrap">
+      <div class="toolbar toolbar-wrap" id="ledgerToolbarLots">
         <label class="toggle-row" id="showHiddenToggle">
           <input type="checkbox" id="showHiddenLots">
           <span>显示已隐藏</span>
@@ -69,7 +77,7 @@
         </div>
       </div>
       <div id="coverList" class="cover-list" hidden></div>
-      <div id="watchList" class="watch-list" hidden></div>
+      <div id="breakevenList" class="watch-list" hidden></div>
       <div id="ledgerList"></div>
     </section>
 

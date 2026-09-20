@@ -32,6 +32,7 @@ const Store = {
     if (s.tFromDate == null) s.tFromDate = '';
     if (!s.unprofitableDisplay) s.unprofitableDisplay = 'tWindow'; // tWindow | full
     if (!s.matchMode) s.matchMode = 'closest'; // closest | time
+    if (!s.ledgerPanel) s.ledgerPanel = 'lots'; // lots | covers | breakeven
     if (!Array.isArray(s.watchPrices)) s.watchPrices = [];
     return this.data;
   },
