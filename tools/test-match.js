@@ -116,5 +116,32 @@ expect('场景7 窗口配到近价', s7win.pairs[0].buyPrice, 3.40);
 expect('场景7 底仓剩余仍满', r7win.lots.get(trades7[0].id).remainingQty, 1000);
 expect('场景7 底仓标记', r7win.lots.get(trades7[0].id).isBase ? 1 : 0, 1);
 
+// 场景8：时间核销 FIFO + 待回补（倒T）
+const trades8 = [
+  mkD('sell', 3.60, 1000, '2026-09-10', '10:00:00'),
+  mkD('buy', 3.50, 1000, '2026-09-10', '14:00:00'),
+];
+const r8 = computeMatches(trades8, { mode: 'time' });
+const s8 = r8.sells.get(trades8[0].id);
+expect('场景8 倒T配对数量', s8.matchedQty, 1000);
+expect('场景8 倒T毛利', s8.grossPnl, 100);
+expect('场景8 待回补为空', r8.pendingCovers.length, 0);
+expect('场景8 标记倒T', s8.isReverse ? 1 : 0, 1);
+
+// 场景9：时间核销 FIFO 先买后卖
+const trades9 = [
+  mkD('buy', 3.40, 1000, '2026-09-10', '09:30:00'),
+  mkD('buy', 3.50, 1000, '2026-09-10', '10:00:00'),
+  mkD('sell', 3.55, 1000, '2026-09-10', '14:00:00'),
+];
+const r9 = computeMatches(trades9, { mode: 'time' });
+const s9 = r9.sells.get(trades9[2].id);
+expect('场景9 FIFO配最早买单', s9.pairs[0].buyPrice, 3.40);
+expect('场景9 近价买单仍剩', r9.lots.get(trades9[1].id).remainingQty, 1000);
+
+// 场景10：默认仍为 closest
+const r10 = computeMatches(trades9);
+expect('场景10 默认closest配近价', r10.sells.get(trades9[2].id).pairs[0].buyPrice, 3.50);
+
 console.log(failed ? `\n${failed} 项失败` : '\n全部通过');
 process.exit(failed ? 1 : 0);

@@ -46,11 +46,19 @@ function isTWindowMode() {
   return Store.settings.ledgerMode === 'tWindow';
 }
 
+function currentMatchMode() {
+  return Store.settings.matchMode === 'time' ? 'time' : 'closest';
+}
+
+function matchOpts(extra) {
+  return Object.assign({ mode: currentMatchMode() }, extra || {});
+}
+
 function recompute() {
-  fullMatchResult = computeMatches(Store.trades);
+  fullMatchResult = computeMatches(Store.trades, matchOpts());
   if (isTWindowMode()) {
     const fromDate = resolveTFromDate(Store.settings);
-    matchResult = computeMatches(Store.trades, { fromDate });
+    matchResult = computeMatches(Store.trades, matchOpts({ fromDate }));
   } else {
     matchResult = fullMatchResult;
   }
@@ -98,6 +106,8 @@ async function ensureSeed() {
       if (!Store.data.settings.tWindowPreset) Store.data.settings.tWindowPreset = 'd5';
       if (Store.data.settings.tFromDate == null) Store.data.settings.tFromDate = '';
       if (!Store.data.settings.unprofitableDisplay) Store.data.settings.unprofitableDisplay = 'tWindow';
+      if (!Store.data.settings.matchMode) Store.data.settings.matchMode = 'closest';
+      if (!Array.isArray(Store.data.settings.watchPrices)) Store.data.settings.watchPrices = [];
       Store.data.seedRevision = seed.seedRevision || 1;
       Store.save();
       console.log('已载入历史对账单', Store.trades.length, '笔');
@@ -235,8 +245,68 @@ function codeStats(code, mr) {
 
 function accountPnl() {
   const acc = Store.account ? Object.assign({}, Store.account, { quotes: Store.settings.quotes }) : { holdings: [], quotes: Store.settings.quotes };
-  // 账户总盈亏始终用全历史配对，避免切做T时间后总盈亏跳动
+  // 账户已实现随当前核销口径；浮动/股息仍用对账单
   return computeAccountPnl(Store.trades, fullMatchResult, acc);
+}
+
+function pendingCoversForView() {
+  return (matchResult && matchResult.pendingCovers) || [];
+}
+
+function renderCoverAndWatch() {
+  const coverBox = $('#coverList');
+  const watchBox = $('#watchList');
+  if (!coverBox || !watchBox) return;
+
+  const covers = currentMatchMode() === 'time' ? pendingCoversForView() : [];
+  if (!covers.length) {
+    coverBox.hidden = true;
+    coverBox.innerHTML = '';
+  } else {
+    coverBox.hidden = false;
+    const byCode = new Map();
+    for (const c of covers) {
+      if (!byCode.has(c.code)) byCode.set(c.code, []);
+      byCode.get(c.code).push(c);
+    }
+    coverBox.innerHTML = `<div class="section-label">待回补（先卖后买）· ${covers.length} 笔</div>` +
+      Array.from(byCode.entries()).sort((a, b) => a[0].localeCompare(b[0])).map(([code, list]) => `
+        <div class="cover-group">
+          <div class="cover-group-title">${esc(displayName(code))} <span class="g-code">${esc(code)}</span></div>
+          ${list.map((c) => `
+            <div class="cover-row">
+              <span class="tag tag-warn">待回补</span>
+              <span class="lot-price">${fmt(c.price, 3)}</span>
+              <span class="lot-qty">${fmt(c.qty, 0)}股</span>
+              <span class="lot-date">${esc(c.date)} ${esc(c.time || '')}</span>
+              <span class="hint-inline">买回低于此价≈倒T盈利</span>
+            </div>`).join('')}
+        </div>`).join('');
+  }
+
+  const watches = Store.settings.watchPrices || [];
+  if (!watches.length) {
+    watchBox.hidden = true;
+    watchBox.innerHTML = '';
+  } else {
+    watchBox.hidden = false;
+    watchBox.innerHTML = `<div class="section-label">扳本关注价 · ${watches.length}</div>` +
+      watches.map((w) => `
+        <div class="watch-row" data-id="${esc(w.id)}">
+          <span class="g-name">${esc(displayName(w.code))}</span>
+          <span class="g-code">${esc(w.code)}</span>
+          <span class="lot-price">${fmt(w.price, 3)}</span>
+          <span class="lot-date">${esc(w.date || '')}</span>
+          <button type="button" class="btn btn-mini" data-act="del-watch" data-id="${esc(w.id)}">移除</button>
+        </div>`).join('');
+    $$('#watchList [data-act="del-watch"]').forEach((b) => {
+      b.addEventListener('click', () => {
+        Store.settings.watchPrices = (Store.settings.watchPrices || []).filter((x) => x.id !== b.dataset.id);
+        Store.save();
+        renderCoverAndWatch();
+      });
+    });
+  }
 }
 
 function bindGroupToggle(listSel, openSet) {
@@ -296,6 +366,7 @@ function matchForCode(code) {
 
 function renderLedger() {
   syncLedgerModeUI();
+  renderCoverAndWatch();
   const showHidden = !!Store.settings.showHiddenLots;
   const tMode = isTWindowMode();
   const fromDate = tMode ? resolveTFromDate(Store.settings) : '';
@@ -344,7 +415,8 @@ function renderLedger() {
 
   const dir = Store.settings.lotSort === 'desc' ? -1 : 1;
   const html = [];
-  for (const code of Array.from(groups.keys()).sort()) {
+  const codes = Array.from(groups.keys()).sort();
+  codes.forEach((code, idx) => {
     const arr = groups.get(code).sort((a, b) => (a.trade.price - b.trade.price) * dir);
     const st = codeStats(code, matchForCode(code));
     const open = uiOpen.ledger.has(code) ? ' open' : '';
@@ -354,8 +426,10 @@ function renderLedger() {
     const unprofTag = tMode && isUnprofitableCode(code)
       ? (showFullLotsForCode(code) ? ' · 未盈利看整体' : ' · 未盈利')
       : '';
+    const typeCls = 'group-' + (st.secType || 'stock');
+    const altCls = 'group-i' + (idx % 2);
 
-    html.push(`<div class="group${open}" data-code="${esc(code)}">
+    html.push(`<div class="group ${altCls} ${typeCls}${open}" data-code="${esc(code)}">
       <div class="group-head">
         <div class="group-head-top">
           <span class="chev">▶</span>
@@ -384,7 +458,7 @@ function renderLedger() {
         ${arr.map(({ trade, remainingQty }) => renderLot(trade, remainingQty)).join('')}
       </div>
     </div>`);
-  }
+  });
   box.innerHTML = html.join('');
 
   bindGroupToggle('#ledgerList', uiOpen.ledger);
@@ -543,13 +617,16 @@ function renderSells() {
   }
 
   const html = [];
-  for (const code of Array.from(byCode.keys()).sort()) {
+  const codes = Array.from(byCode.keys()).sort();
+  codes.forEach((code, idx) => {
     const list = byCode.get(code);
     const st = codeStats(code, matchForCode(code));
     const open = uiOpen.sells.has(code) ? ' open' : '';
     const filterLabel = filter === 'win' ? '做T成功' : filter === 'loss' ? '亏损卖出' : '卖出';
+    const typeCls = 'group-' + (st.secType || 'stock');
+    const altCls = 'group-i' + (idx % 2);
 
-    html.push(`<div class="group${open}" data-code="${esc(code)}">
+    html.push(`<div class="group ${altCls} ${typeCls}${open}" data-code="${esc(code)}">
       <div class="group-head">
         <div class="group-head-top">
           <span class="chev">▶</span>
@@ -572,24 +649,63 @@ function renderSells() {
         ${list.map((s) => renderSellCard(s)).join('')}
       </div>
     </div>`);
-  }
+  });
   box.innerHTML = html.join('');
 
   bindGroupToggle('#sellList', uiOpen.sells);
   $$('#sellList [data-act="del-trade"]').forEach((b) => {
     b.addEventListener('click', () => deleteTrade(b.dataset.id));
   });
+  $$('#sellList [data-act="pin-watch"]').forEach((b) => {
+    b.addEventListener('click', () => pinWatchFromSell(b.dataset.id));
+  });
+}
+
+function pinWatchFromSell(sellId) {
+  const s = Store.trades.find((t) => t.id === sellId);
+  if (!s) return;
+  const list = Store.settings.watchPrices || [];
+  if (list.some((w) => w.fromSellId === sellId)) {
+    Store.settings.watchPrices = list.filter((w) => w.fromSellId !== sellId);
+  } else {
+    list.push({
+      id: 'w' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      code: s.code,
+      price: s.price,
+      date: s.date,
+      fromSellId: s.id,
+    });
+    Store.settings.watchPrices = list;
+  }
+  Store.save();
+  renderSells();
+  renderCoverAndWatch();
 }
 
 function renderSellCard(s) {
   const r = matchResult.sells.get(s.id) || {
     pairs: [], matchedQty: 0, unmatchedQty: s.qty, netPnl: 0, sellFee: 0, buyFeeShare: 0, success: false,
   };
-  const tag = r.matchedQty === 0
-    ? '<span class="tag tag-warn">无买单可配</span>'
-    : r.success ? '<span class="tag tag-win">做T成功</span>' : '<span class="tag tag-loss">亏损卖出</span>';
+  let tag;
+  if (r.matchedQty === 0 && r.unmatchedQty > 0) {
+    tag = currentMatchMode() === 'time'
+      ? '<span class="tag tag-warn">待回补</span>'
+      : '<span class="tag tag-warn">无买单可配</span>';
+  } else if (r.isReverse && r.matchedQty > 0) {
+    tag = r.success
+      ? '<span class="tag tag-win">倒T成功</span>'
+      : '<span class="tag tag-loss">倒T亏损</span>';
+  } else if (r.matchedQty === 0) {
+    tag = '<span class="tag tag-warn">无买单可配</span>';
+  } else {
+    tag = r.success ? '<span class="tag tag-win">做T成功</span>' : '<span class="tag tag-loss">亏损卖出</span>';
+  }
   const unmatched = r.unmatchedQty > 0 && r.matchedQty > 0
-    ? `<span class="tag tag-warn">${fmt(r.unmatchedQty, 0)}股未配对</span>` : '';
+    ? `<span class="tag tag-warn">${fmt(r.unmatchedQty, 0)}股待回补/未配</span>` : '';
+  const watched = (Store.settings.watchPrices || []).some((w) => w.fromSellId === s.id);
+  const pinBtn = (!r.success && r.matchedQty > 0) || (r.matchedQty === 0)
+    ? `<button type="button" class="btn btn-mini btn-hide" data-act="pin-watch" data-id="${s.id}">${watched ? '已钉关注价' : '钉扳本关注价'}</button>`
+    : '';
 
   return `<div class="sell-card">
     <div class="sell-head">
@@ -603,11 +719,14 @@ function renderSellCard(s) {
     </div>
     ${r.pairs.length ? `<div class="pairs">${r.pairs.map((p) => `
       <div class="pair-row">
-        <span>配对买单 ${fmt(p.buyPrice, 3)} × ${fmt(p.qty, 0)}股（${esc(p.buyDate)}）</span>
+        <span>${p.kind === 'cover' ? '回补买入' : '配对买单'} ${fmt(p.buyPrice, 3)} × ${fmt(p.qty, 0)}股（${esc(p.buyDate)}）</span>
         <span class="p-pnl ${pnlClass((s.price - p.buyPrice) * p.qty)}">${fmtSign(round2((s.price - p.buyPrice) * p.qty))}</span>
       </div>`).join('')}</div>` : ''}
     <div class="sell-fees">卖出费用 ${feeText(s.fees)}，买入费用分摊 ${fmt(r.buyFeeShare)}</div>
-    <div class="lot-actions"><button class="btn btn-mini" data-act="del-trade" data-id="${s.id}">删除此笔</button></div>
+    <div class="lot-actions">
+      ${pinBtn}
+      <button class="btn btn-mini" data-act="del-trade" data-id="${s.id}">删除此笔</button>
+    </div>
   </div>`;
 }
 
@@ -652,6 +771,25 @@ $$('#unprofitableSeg button').forEach((b) => {
     renderAll();
   });
 });
+$$('#matchModeSeg button').forEach((b) => {
+  b.addEventListener('click', () => {
+    Store.settings.matchMode = b.dataset.mode;
+    Store.save();
+    recompute();
+    renderAll();
+    syncMatchModeUI();
+  });
+});
+function syncMatchModeUI() {
+  const mode = currentMatchMode();
+  $$('#matchModeSeg button').forEach((b) => b.classList.toggle('active', b.dataset.mode === mode));
+  const hint = $('#matchModeHint');
+  if (hint) {
+    hint.textContent = mode === 'time'
+      ? '当前：时间顺序。台账会显示「待回补」；默认可随时切回价格最相近。'
+      : '当前：价格最相近（与 v1.0 稳定版习惯一致）。';
+  }
+}
 const tFromDateInput = $('#tFromDateInput');
 if (tFromDateInput) {
   tFromDateInput.addEventListener('change', () => {
@@ -727,7 +865,9 @@ function renderStats() {
         <div class="k">账户总盈亏 = 已实现 + 持仓浮动 + 股息利息${asOf ? '（数据截至 ' + asOf + '，不含今日）' : ''}（始终全历史）</div></div>
       ${tMode ? `<div class="sum-item big"><div class="v">${esc(fromDate)}</div>
         <div class="k">当前台账为「做T时间」口径：下方做T表按起始日起配对；切回「整体持仓」看全貌</div></div>` : ''}
-      <div class="sum-item"><div class="v ${pnlClass(ap.realized)}">${fmtSign(ap.realized)}</div><div class="k">已实现(全历史做T配对)</div></div>
+      <div class="sum-item"><div class="v">${currentMatchMode() === 'time' ? '时间顺序' : '价格最相近'}</div>
+        <div class="k">核销口径（在「我的」切换）</div></div>
+      <div class="sum-item"><div class="v ${pnlClass(ap.realized)}">${fmtSign(ap.realized)}</div><div class="k">已实现(当前核销·全历史)</div></div>
       <div class="sum-item"><div class="v ${pnlClass(ap.floatPnl)}">${fmtSign(ap.floatPnl)}</div><div class="k">持仓浮动盈亏</div></div>
       <div class="sum-item"><div class="v c-up">${fmtSign(ap.realizedWin)}</div><div class="k">做T盈利合计</div></div>
       <div class="sum-item"><div class="v c-down">${fmtSign(ap.realizedLoss)}</div><div class="k">做T亏损合计</div></div>
@@ -906,6 +1046,7 @@ $('#btnClear').addEventListener('click', () => {
 
 /* ---------- 总渲染 ---------- */
 function renderAll() {
+  syncMatchModeUI();
   renderLedger();
   // 台账渲染后填充各笔预计利润
   $$('#ledgerList .est-input').forEach((inp) => {

@@ -62,6 +62,8 @@
           <button data-sort="desc">价格从高到低</button>
         </div>
       </div>
+      <div id="coverList" class="cover-list" hidden></div>
+      <div id="watchList" class="watch-list" hidden></div>
       <div id="ledgerList"></div>
     </section>
 
@@ -111,6 +113,16 @@
           <label>数量<input type="number" name="qty" step="1" min="1" required></label>
           <button type="submit" class="btn btn-primary form-full">保存（费用按费率自动计算）</button>
         </form>
+      </div>
+
+      <div class="card">
+        <h2>做T核销口径</h2>
+        <p class="hint">默认「价格最相近」与以前一致。可切换为「时间顺序」：先买后卖按 FIFO；先卖无买单则进「待回补」，之后买入优先回补。账户总盈亏随所选口径的已实现部分变化。</p>
+        <div class="seg seg-wrap" id="matchModeSeg">
+          <button type="button" data-mode="closest">价格最相近（默认）</button>
+          <button type="button" data-mode="time">时间顺序+待回补</button>
+        </div>
+        <p class="hint" id="matchModeHint"></p>
       </div>
 
       <div class="card">

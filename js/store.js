@@ -31,6 +31,8 @@ const Store = {
     if (!s.tWindowPreset) s.tWindowPreset = 'd5';
     if (s.tFromDate == null) s.tFromDate = '';
     if (!s.unprofitableDisplay) s.unprofitableDisplay = 'tWindow'; // tWindow | full
+    if (!s.matchMode) s.matchMode = 'closest'; // closest | time
+    if (!Array.isArray(s.watchPrices)) s.watchPrices = [];
     return this.data;
   },
 

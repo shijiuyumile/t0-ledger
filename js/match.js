@@ -1,8 +1,8 @@
 /**
- * 核销引擎："价格最相近"配对（不限是否同日）。
- * 卖单与同代码剩余买单配对：优先卖价之上最接近的买价，级联直至配完。
- * 整笔卖单扣双边费用后净赚 => 做T成功；净亏 => 亏损卖出。
- * 兼容同日先卖后买回。
+ * 核销引擎：
+ * - closest（默认）：价格最相近配对
+ * - time：按成交时间 FIFO；先卖无多头 → 待回补，之后买入优先回补
+ * 支持 fromDate 底仓切割（做T时间视图）。
  */
 'use strict';
 
@@ -10,13 +10,54 @@ function tradeTimeKey(t) {
   return (t.date || '') + ' ' + (t.time || '00:00:00');
 }
 
+function emptySellResult() {
+  return {
+    pairs: [],
+    matchedQty: 0,
+    unmatchedQty: 0,
+    grossPnl: 0,
+    sellFee: 0,
+    buyFeeShare: 0,
+    netPnl: 0,
+    success: false,
+    isT: false,
+    tNetPnl: 0,
+    tMatchedQty: 0,
+    posMatchedQty: 0,
+    posNetPnl: 0,
+    isPosOnly: false,
+    isReverse: false,
+  };
+}
+
+function finalizeSellResult(sell, r) {
+  const sellFeeAll = totalFees(sell.fees);
+  const matchedQty = r.matchedQty;
+  r.unmatchedQty = Math.max(0, sell.qty - matchedQty);
+  r.sellFee = matchedQty === 0
+    ? 0
+    : (matchedQty === sell.qty ? sellFeeAll : round2(sellFeeAll * (matchedQty / sell.qty)));
+  r.grossPnl = round2(r.grossPnl);
+  r.buyFeeShare = round2(r.buyFeeShare);
+  r.netPnl = round2(r.grossPnl - r.sellFee - r.buyFeeShare);
+  r.success = matchedQty > 0 && r.netPnl > 0;
+  r.isT = matchedQty > 0;
+  r.tNetPnl = r.netPnl;
+  r.tMatchedQty = matchedQty;
+  return r;
+}
+
 /**
  * @param {object[]} trades
- * @param {{ fromDate?: string }} [opts] 若设 fromDate(YYYY-MM-DD)：
- *   - 该日之前的买单视为底仓，不参与配对
- *   - 该日之前的卖单不参与本口径核销（仅做T时间视图用）
+ * @param {{ fromDate?: string, mode?: 'closest'|'time' }} [opts]
  */
 function computeMatches(trades, opts) {
+  const mode = opts && opts.mode === 'time' ? 'time' : 'closest';
+  if (mode === 'time') return computeMatchesTime(trades, opts);
+  return computeMatchesClosest(trades, opts);
+}
+
+function computeMatchesClosest(trades, opts) {
   const fromDate = opts && opts.fromDate ? String(opts.fromDate) : '';
   const lots = new Map();
   const sells = new Map();
@@ -37,10 +78,8 @@ function computeMatches(trades, opts) {
 
   for (const sell of sellTrades) {
     const candidates = buysByCode.get(sell.code) || [];
-    const pairs = [];
+    const r = emptySellResult();
     let remaining = sell.qty;
-    let grossPnl = 0;
-    let buyFeeShare = 0;
 
     while (remaining > 0) {
       const pick = pickClosestBuy(sell.price, candidates, lots);
@@ -51,35 +90,152 @@ function computeMatches(trades, opts) {
       lot.matchedQty += q;
       lot.matches.push({ sellId: sell.id, qty: q, sellPrice: sell.price });
       const share = totalFees(pick.fees) * (q / pick.qty);
-      buyFeeShare += share;
-      grossPnl += (sell.price - pick.price) * q;
-      pairs.push({ buyId: pick.id, qty: q, buyPrice: pick.price, buyDate: pick.date, buyFeeShare: round2(share) });
+      r.buyFeeShare += share;
+      r.grossPnl += (sell.price - pick.price) * q;
+      r.pairs.push({
+        buyId: pick.id, qty: q, buyPrice: pick.price, buyDate: pick.date,
+        buyFeeShare: round2(share), kind: 'long',
+      });
+      r.matchedQty += q;
       remaining -= q;
     }
 
-    const sellFeeAll = totalFees(sell.fees);
-    const matchedQty = sell.qty - remaining;
-    const sellFee = matchedQty === sell.qty ? sellFeeAll : round2(sellFeeAll * (matchedQty / sell.qty));
-    const netPnl = round2(grossPnl - sellFee - buyFeeShare);
-    sells.set(sell.id, {
-      pairs,
-      matchedQty,
-      unmatchedQty: remaining,
-      grossPnl: round2(grossPnl),
-      sellFee: round2(sellFee),
-      buyFeeShare: round2(buyFeeShare),
-      netPnl,
-      success: matchedQty > 0 && netPnl > 0,
-      isT: matchedQty > 0,
-      tNetPnl: netPnl,
-      tMatchedQty: matchedQty,
-      posMatchedQty: 0,
-      posNetPnl: 0,
-      isPosOnly: false,
-    });
+    sells.set(sell.id, finalizeSellResult(sell, r));
   }
 
-  return { lots, sells };
+  return { lots, sells, pendingCovers: [], mode: 'closest' };
+}
+
+/**
+ * 时间序 FIFO：先买后卖配最早买单；先卖无多头进待回补，之后买入优先回补。
+ */
+function computeMatchesTime(trades, opts) {
+  const fromDate = opts && opts.fromDate ? String(opts.fromDate) : '';
+  const lots = new Map();
+  const sells = new Map();
+  const pendingCovers = []; // 最终仍未回补的空头
+  const longsByCode = new Map(); // code -> [{ trade, lot }] queue FIFO
+  const shortsByCode = new Map(); // code -> [{ sell, remaining, sellFeeLeft }] queue FIFO
+
+  for (const t of trades) {
+    if (t.side !== 'buy') continue;
+    const isBase = !!(fromDate && t.date < fromDate);
+    lots.set(t.id, { remainingQty: t.qty, matchedQty: 0, matches: [], isBase });
+  }
+
+  const events = trades
+    .filter((t) => !fromDate || t.date >= fromDate)
+    .slice()
+    .sort((a, b) => tradeTimeKey(a).localeCompare(tradeTimeKey(b)) || (a.seq || 0) - (b.seq || 0));
+
+  function ensureSell(sell) {
+    if (!sells.has(sell.id)) {
+      const r = emptySellResult();
+      r.unmatchedQty = sell.qty;
+      sells.set(sell.id, r);
+    }
+    return sells.get(sell.id);
+  }
+
+  for (const t of events) {
+    if (t.side === 'buy') {
+      const lot = lots.get(t.id);
+      if (!lot || lot.isBase) continue;
+
+      let buyLeft = t.qty;
+      if (!shortsByCode.has(t.code)) shortsByCode.set(t.code, []);
+      const shorts = shortsByCode.get(t.code);
+
+      while (buyLeft > 0 && shorts.length) {
+        const sh = shorts[0];
+        const q = Math.min(buyLeft, sh.remaining);
+        const sell = sh.sell;
+        const r = ensureSell(sell);
+        const buyShare = totalFees(t.fees) * (q / t.qty);
+        const sellShare = totalFees(sell.fees) * (q / sell.qty);
+        // 倒T：卖高买低为正
+        r.grossPnl += (sell.price - t.price) * q;
+        r.buyFeeShare += buyShare;
+        r.matchedQty += q;
+        r.isReverse = true;
+        r.pairs.push({
+          buyId: t.id, qty: q, buyPrice: t.price, buyDate: t.date,
+          buyFeeShare: round2(buyShare), kind: 'cover',
+        });
+        lot.matchedQty += q;
+        lot.matches.push({ sellId: sell.id, qty: q, sellPrice: sell.price, kind: 'cover' });
+        sh.remaining -= q;
+        buyLeft -= q;
+        if (sh.remaining <= 0) shorts.shift();
+      }
+
+      lot.remainingQty = buyLeft;
+      if (buyLeft > 0) {
+        if (!longsByCode.has(t.code)) longsByCode.set(t.code, []);
+        longsByCode.get(t.code).push({ trade: t, lot });
+      }
+      continue;
+    }
+
+    if (t.side !== 'sell') continue;
+    const r = ensureSell(t);
+    let sellLeft = t.qty;
+
+    if (!longsByCode.has(t.code)) longsByCode.set(t.code, []);
+    const longs = longsByCode.get(t.code);
+
+    while (sellLeft > 0 && longs.length) {
+      const entry = longs[0];
+      const buy = entry.trade;
+      const lot = entry.lot;
+      if (lot.remainingQty <= 0) { longs.shift(); continue; }
+      const q = Math.min(sellLeft, lot.remainingQty);
+      const share = totalFees(buy.fees) * (q / buy.qty);
+      r.grossPnl += (t.price - buy.price) * q;
+      r.buyFeeShare += share;
+      r.matchedQty += q;
+      r.pairs.push({
+        buyId: buy.id, qty: q, buyPrice: buy.price, buyDate: buy.date,
+        buyFeeShare: round2(share), kind: 'long',
+      });
+      lot.remainingQty -= q;
+      lot.matchedQty += q;
+      lot.matches.push({ sellId: t.id, qty: q, sellPrice: t.price, kind: 'long' });
+      sellLeft -= q;
+      if (lot.remainingQty <= 0) longs.shift();
+    }
+
+    if (sellLeft > 0) {
+      if (!shortsByCode.has(t.code)) shortsByCode.set(t.code, []);
+      shortsByCode.get(t.code).push({ sell: t, remaining: sellLeft });
+    }
+  }
+
+  for (const sell of trades) {
+    if (sell.side !== 'sell') continue;
+    if (fromDate && sell.date < fromDate) continue;
+    const r = ensureSell(sell);
+    finalizeSellResult(sell, r);
+  }
+
+  for (const [, shorts] of shortsByCode) {
+    for (const sh of shorts) {
+      if (sh.remaining <= 0) continue;
+      pendingCovers.push({
+        sellId: sh.sell.id,
+        code: sh.sell.code,
+        name: sh.sell.name || '',
+        secType: sh.sell.secType || 'stock',
+        price: sh.sell.price,
+        qty: sh.remaining,
+        date: sh.sell.date,
+        time: sh.sell.time || '',
+        fees: sh.sell.fees,
+      });
+    }
+  }
+
+  return { lots, sells, pendingCovers, mode: 'time' };
 }
 
 function pickClosestBuy(sellPrice, candidates, lots) {
@@ -122,7 +278,6 @@ function estimateLotProfit(buyTrade, remainingQty, estPrice, feeRules) {
 /**
  * 账户总盈亏（对齐券商常见口径）：
  * 总盈亏 = 已实现盈亏(卖出配对净利) + 持仓浮动盈亏 + 股息 + 利息
- * 浮动盈亏优先用对账单持仓盈亏；若用户填了现价则按现价重算。
  */
 function computeAccountPnl(trades, matchResult, account) {
   let realized = 0;
@@ -139,7 +294,6 @@ function computeAccountPnl(trades, matchResult, account) {
 
   let floatPnl = 0;
   const holdings = (account && account.holdings) || [];
-  // 优先用对账单「持仓盈亏合计」（含已清仓但仍挂账的盈亏）
   if (account && account.holdPnlTotal != null && !Number.isNaN(Number(account.holdPnlTotal))) {
     floatPnl = Number(account.holdPnlTotal);
   } else {
