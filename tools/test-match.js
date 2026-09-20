@@ -95,5 +95,26 @@ const est = estimateLotProfit(b6, 1000, 3.55, DEFAULT_FEE_RULES);
 // 毛利50，卖费 max(3550*0.00005,0.1)=0.18，买费摊 0.18
 expect('场景6 预估净利', est.net, 50 - 0.18 - 0.18);
 
+// 场景7：做T起始日 — 起始日前买单为底仓，不参与配对
+function mkD(side, price, qty, date, time) {
+  const t = mk(side, price, qty, time);
+  t.date = date;
+  t.id = side + price + '_' + date + '_' + time;
+  return t;
+}
+const trades7 = [
+  mkD('buy', 3.52, 1000, '2026-01-01', '09:31:00'), // 底仓：全历史下更接近卖价
+  mkD('buy', 3.40, 1000, '2026-09-10', '09:31:00'),
+  mkD('sell', 3.55, 1000, '2026-09-11', '13:00:00'),
+];
+const r7full = computeMatches(trades7);
+const r7win = computeMatches(trades7, { fromDate: '2026-09-01' });
+const s7full = r7full.sells.get(trades7[2].id);
+const s7win = r7win.sells.get(trades7[2].id);
+expect('场景7 全历史配到底仓价', s7full.pairs[0].buyPrice, 3.52);
+expect('场景7 窗口配到近价', s7win.pairs[0].buyPrice, 3.40);
+expect('场景7 底仓剩余仍满', r7win.lots.get(trades7[0].id).remainingQty, 1000);
+expect('场景7 底仓标记', r7win.lots.get(trades7[0].id).isBase ? 1 : 0, 1);
+
 console.log(failed ? `\n${failed} 项失败` : '\n全部通过');
 process.exit(failed ? 1 : 0);

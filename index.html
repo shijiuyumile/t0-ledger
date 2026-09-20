@@ -24,6 +24,34 @@
     <!-- 台账 -->
     <section id="view-ledger" class="view">
       <div class="summary-strip" id="ledgerSummary"></div>
+      <div class="ledger-mode-bar">
+        <div class="seg" id="ledgerModeSeg">
+          <button type="button" data-mode="full">整体持仓</button>
+          <button type="button" data-mode="tWindow">做T时间</button>
+        </div>
+        <div id="tWindowControls" class="t-window-controls" hidden>
+          <div class="seg seg-wrap" id="tWindowPresetSeg">
+            <button type="button" data-preset="today">今天</button>
+            <button type="button" data-preset="d2">近2天</button>
+            <button type="button" data-preset="d3">近3天</button>
+            <button type="button" data-preset="d4">近4天</button>
+            <button type="button" data-preset="d5">近5天</button>
+            <button type="button" data-preset="halfMonth">近半月</button>
+            <button type="button" data-preset="month">近1月</button>
+            <button type="button" data-preset="quarter">近3月</button>
+            <button type="button" data-preset="custom">自选日期</button>
+          </div>
+          <label class="date-row" id="tFromDateRow">
+            <span>起始日</span>
+            <input type="date" id="tFromDateInput">
+          </label>
+          <div class="seg seg-wrap" id="unprofitableSeg">
+            <button type="button" data-u="tWindow">未盈利跟时间</button>
+            <button type="button" data-u="full">未盈利看整体</button>
+          </div>
+          <p class="hint mode-hint" id="tWindowHint"></p>
+        </div>
+      </div>
       <div class="toolbar toolbar-wrap">
         <label class="toggle-row" id="showHiddenToggle">
           <input type="checkbox" id="showHiddenLots">

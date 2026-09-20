@@ -5,10 +5,77 @@
 
 Store.load();
 
+let fullMatchResult = { lots: new Map(), sells: new Map() };
 let matchResult = { lots: new Map(), sells: new Map() };
 
+function todayISO() {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return y + '-' + m + '-' + day;
+}
+
+function addDaysISO(iso, delta) {
+  const d = new Date(String(iso) + 'T12:00:00');
+  d.setDate(d.getDate() + delta);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return y + '-' + m + '-' + day;
+}
+
+/** 根据设置算出做T起始日（含当天） */
+function resolveTFromDate(settings) {
+  const s = settings || Store.settings;
+  const today = todayISO();
+  const p = s.tWindowPreset || 'd5';
+  if (p === 'custom') return s.tFromDate || today;
+  if (p === 'today') return today;
+  if (p === 'd2') return addDaysISO(today, -1);
+  if (p === 'd3') return addDaysISO(today, -2);
+  if (p === 'd4') return addDaysISO(today, -3);
+  if (p === 'd5') return addDaysISO(today, -4);
+  if (p === 'halfMonth') return addDaysISO(today, -14);
+  if (p === 'month') return addDaysISO(today, -30);
+  if (p === 'quarter') return addDaysISO(today, -90);
+  return today;
+}
+
+function isTWindowMode() {
+  return Store.settings.ledgerMode === 'tWindow';
+}
+
 function recompute() {
-  matchResult = computeMatches(Store.trades);
+  fullMatchResult = computeMatches(Store.trades);
+  if (isTWindowMode()) {
+    const fromDate = resolveTFromDate(Store.settings);
+    matchResult = computeMatches(Store.trades, { fromDate });
+  } else {
+    matchResult = fullMatchResult;
+  }
+}
+
+/** 某标的历史累计做T已实现（始终用全历史配对口径） */
+function codeFullRealized(code) {
+  let realized = 0;
+  for (const t of Store.trades) {
+    if (t.code !== code || t.side !== 'sell') continue;
+    const r = fullMatchResult.sells.get(t.id);
+    if (r && r.matchedQty > 0) realized += r.netPnl;
+  }
+  return round2(realized);
+}
+
+function isUnprofitableCode(code) {
+  return codeFullRealized(code) <= 0;
+}
+
+/** 做T时间模式下，该标的是否应按整体持仓显示（含底仓） */
+function showFullLotsForCode(code) {
+  return isTWindowMode()
+    && Store.settings.unprofitableDisplay === 'full'
+    && isUnprofitableCode(code);
 }
 
 /** 拉取线上 seed：空库全量载入；已有数据则按 key 增量合并，并刷新较新的账户快照 */
@@ -27,6 +94,10 @@ async function ensureSeed() {
       if (!Store.data.settings.sellFilter) Store.data.settings.sellFilter = 'loss';
       if (!Store.data.settings.quotes) Store.data.settings.quotes = {};
       if (Store.data.settings.showHiddenLots == null) Store.data.settings.showHiddenLots = false;
+      if (!Store.data.settings.ledgerMode) Store.data.settings.ledgerMode = 'full';
+      if (!Store.data.settings.tWindowPreset) Store.data.settings.tWindowPreset = 'd5';
+      if (Store.data.settings.tFromDate == null) Store.data.settings.tFromDate = '';
+      if (!Store.data.settings.unprofitableDisplay) Store.data.settings.unprofitableDisplay = 'tWindow';
       Store.data.seedRevision = seed.seedRevision || 1;
       Store.save();
       console.log('已载入历史对账单', Store.trades.length, '笔');
@@ -104,7 +175,9 @@ function displayName(code) {
 const uiOpen = { ledger: new Set(), sells: new Set() };
 
 /** 某标的：持仓、成本、浮动、做T盈利/亏损合计 */
-function codeStats(code) {
+function codeStats(code, mr) {
+  mr = mr || matchResult;
+  const includeBase = !isTWindowMode() || showFullLotsForCode(code);
   let buyQty = 0, sellQty = 0, sumQty = 0, sumCost = 0, sumFee = 0, lotCount = 0;
   let realized = 0, winSum = 0, lossSum = 0, win = 0, loss = 0;
   let secType = 'stock';
@@ -114,16 +187,16 @@ function codeStats(code) {
     secType = t.secType || secType;
     if (t.side === 'buy') {
       buyQty += t.qty;
-      const lot = matchResult.lots.get(t.id);
-      if (lot && lot.remainingQty > 0) {
-        sumQty += lot.remainingQty;
-        sumCost += t.price * lot.remainingQty;
-        sumFee += totalFees(t.fees) * (lot.remainingQty / t.qty);
-        lotCount++;
-      }
+      const lot = mr.lots.get(t.id);
+      if (!lot || lot.remainingQty <= 0) continue;
+      if (lot.isBase && !includeBase) continue;
+      sumQty += lot.remainingQty;
+      sumCost += t.price * lot.remainingQty;
+      sumFee += totalFees(t.fees) * (lot.remainingQty / t.qty);
+      lotCount++;
     } else {
       sellQty += t.qty;
-      const r = matchResult.sells.get(t.id);
+      const r = mr.sells.get(t.id);
       if (r && r.matchedQty > 0) {
         realized += r.netPnl;
         if (r.netPnl > 0) { winSum += r.netPnl; win++; }
@@ -156,12 +229,14 @@ function codeStats(code) {
     winSum: round2(winSum),
     lossSum: round2(lossSum),
     win, loss, secType, quote,
+    fullRealized: codeFullRealized(code),
   };
 }
 
 function accountPnl() {
   const acc = Store.account ? Object.assign({}, Store.account, { quotes: Store.settings.quotes }) : { holdings: [], quotes: Store.settings.quotes };
-  return computeAccountPnl(Store.trades, matchResult, acc);
+  // 账户总盈亏始终用全历史配对，避免切做T时间后总盈亏跳动
+  return computeAccountPnl(Store.trades, fullMatchResult, acc);
 }
 
 function bindGroupToggle(listSel, openSet) {
@@ -191,14 +266,49 @@ $$('.tabbar .tab').forEach((btn) => {
 });
 
 /* ---------- 台账 ---------- */
+function syncLedgerModeUI() {
+  const mode = Store.settings.ledgerMode || 'full';
+  $$('#ledgerModeSeg button').forEach((b) => b.classList.toggle('active', b.dataset.mode === mode));
+  const controls = $('#tWindowControls');
+  if (controls) controls.hidden = mode !== 'tWindow';
+  if (mode !== 'tWindow') return;
+
+  const preset = Store.settings.tWindowPreset || 'd5';
+  $$('#tWindowPresetSeg button').forEach((b) => b.classList.toggle('active', b.dataset.preset === preset));
+  const fromDate = resolveTFromDate(Store.settings);
+  const dateInput = $('#tFromDateInput');
+  if (dateInput && dateInput.value !== fromDate) dateInput.value = fromDate;
+  const dateRow = $('#tFromDateRow');
+  if (dateRow) dateRow.style.opacity = preset === 'custom' ? '1' : '0.85';
+
+  const u = Store.settings.unprofitableDisplay || 'tWindow';
+  $$('#unprofitableSeg button').forEach((b) => b.classList.toggle('active', b.dataset.u === u));
+
+  const hint = $('#tWindowHint');
+  if (hint) {
+    hint.textContent = '做T起始日 ' + fromDate + '（此前为底仓，不参与配对/默认不显示）。未盈利=该标的历史累计做T净利≤0。';
+  }
+}
+
+function matchForCode(code) {
+  return showFullLotsForCode(code) ? fullMatchResult : matchResult;
+}
+
 function renderLedger() {
+  syncLedgerModeUI();
   const showHidden = !!Store.settings.showHiddenLots;
+  const tMode = isTWindowMode();
+  const fromDate = tMode ? resolveTFromDate(Store.settings) : '';
   const groups = new Map();
   let hiddenCount = 0;
   for (const t of Store.trades) {
     if (t.side !== 'buy') continue;
-    const lot = matchResult.lots.get(t.id);
+    const mr = matchForCode(t.code);
+    const lot = mr.lots.get(t.id);
     if (!lot || lot.remainingQty <= 0) continue;
+    if (tMode && !showFullLotsForCode(t.code)) {
+      if (lot.isBase || t.date < fromDate) continue;
+    }
     if (t.tHidden) {
       hiddenCount++;
       if (!showHidden) continue;
@@ -210,10 +320,11 @@ function renderLedger() {
   let totalLots = 0;
   for (const arr of groups.values()) totalLots += arr.length;
   const ap = accountPnl();
+  const modeLabel = tMode ? '做T时间' : '整体持仓';
   $('#ledgerSummary').innerHTML = `
     <div class="sum-item"><div class="v ${pnlClass(ap.total)}">${fmtSign(ap.total)}</div><div class="k">账户总盈亏</div></div>
     <div class="sum-item"><div class="v">${groups.size}</div><div class="k">持仓标的</div></div>
-    <div class="sum-item"><div class="v">${totalLots}${hiddenCount && !showHidden ? `<span style="font-size:11px;font-weight:500;color:var(--text2)">/${hiddenCount}隐</span>` : ''}</div><div class="k">待做T买单</div></div>`;
+    <div class="sum-item"><div class="v">${totalLots}${hiddenCount && !showHidden ? `<span style="font-size:11px;font-weight:500;color:var(--text2)">/${hiddenCount}隐</span>` : ''}</div><div class="k">待做T·${modeLabel}</div></div>`;
 
   const showHiddenEl = $('#showHiddenLots');
   if (showHiddenEl) showHiddenEl.checked = showHidden;
@@ -225,7 +336,9 @@ function renderLedger() {
   if (!groups.size) {
     box.innerHTML = hiddenCount && !showHidden
       ? `<div class="empty">待做T买单都已隐藏（${hiddenCount}笔）<br>打开上方「显示已隐藏」可查看或取消隐藏</div>`
-      : '<div class="empty">暂无待做T买单<br>去"我的"页导入交割单或手动录入</div>';
+      : (tMode
+        ? `<div class="empty">做T时间（自 ${esc(fromDate)}）内暂无待做T买单<br>可切换「整体持仓」，或放宽时间 / 将未盈利标的设为「看整体」</div>`
+        : '<div class="empty">暂无待做T买单<br>去"我的"页导入交割单或手动录入</div>');
     return;
   }
 
@@ -233,11 +346,14 @@ function renderLedger() {
   const html = [];
   for (const code of Array.from(groups.keys()).sort()) {
     const arr = groups.get(code).sort((a, b) => (a.trade.price - b.trade.price) * dir);
-    const st = codeStats(code);
+    const st = codeStats(code, matchForCode(code));
     const open = uiOpen.ledger.has(code) ? ' open' : '';
     const floatText = st.floatPnl == null ? '--' : fmtSign(st.floatPnl);
     const floatCls = st.floatPnl == null ? '' : pnlClass(st.floatPnl);
     const hiddenInGroup = arr.filter((x) => x.trade.tHidden).length;
+    const unprofTag = tMode && isUnprofitableCode(code)
+      ? (showFullLotsForCode(code) ? ' · 未盈利看整体' : ' · 未盈利')
+      : '';
 
     html.push(`<div class="group${open}" data-code="${esc(code)}">
       <div class="group-head">
@@ -246,7 +362,7 @@ function renderLedger() {
           <span class="g-name">${esc(displayName(code))}</span>
           <span class="g-code">${esc(code)}</span>
           <button class="badge" data-act="cycle-type" data-code="${esc(code)}">${SEC_TYPE_LABEL[st.secType] || '股票'}</button>
-          <div class="g-meta">${arr.length}笔待做T${hiddenInGroup ? `（隐${hiddenInGroup}）` : ''}<br>点开查看明细</div>
+          <div class="g-meta">${arr.length}笔待做T${hiddenInGroup ? `（隐${hiddenInGroup}）` : ''}${unprofTag}<br>点开查看明细</div>
         </div>
         <div class="group-stats">
           <div class="gs"><div class="v">${fmt(st.holdQty, 0)}</div><div class="k">持仓总量</div></div>
@@ -279,7 +395,7 @@ function renderLedger() {
       const price = parseFloat(inp.value) || null;
       Store.updateTrade(id, { estSell: price });
       const t = Store.trades.find((x) => x.id === id);
-      const lot = matchResult.lots.get(id);
+      const lot = matchForCode(t.code).lots.get(id);
       updateEstOut(inp.closest('.lot-est'), t, lot ? lot.remainingQty : 0);
     });
   });
@@ -290,7 +406,7 @@ function renderLedger() {
       const v = parseFloat(inp.value) || 0;
       Store.settings.quotes[code] = v;
       Store.save();
-      const st = codeStats(code);
+      const st = codeStats(code, matchForCode(code));
       const el = $(`.float-v[data-code="${code}"]`);
       if (!el) return;
       if (st.floatPnl == null) {
@@ -342,7 +458,7 @@ function toggleLotHidden(id) {
   renderLedger();
   $$('#ledgerList .est-input').forEach((inp) => {
     const tr = Store.trades.find((x) => x.id === inp.dataset.id);
-    const lot = matchResult.lots.get(inp.dataset.id);
+    const lot = tr ? matchForCode(tr.code).lots.get(inp.dataset.id) : null;
     if (tr && lot) updateEstOut(inp.closest('.lot-est'), tr, lot.remainingQty);
   });
 }
@@ -384,12 +500,29 @@ function renderSells() {
     .sort((a, b) => tradeTimeKey(b).localeCompare(tradeTimeKey(a)));
 
   const ap = accountPnl();
-  $('#sellSummary').innerHTML = `
+  let windowNet = 0, windowWin = 0, windowLoss = 0;
+  for (const s of all) {
+    const r = matchResult.sells.get(s.id);
+    if (!r || r.matchedQty === 0) continue;
+    windowNet += r.netPnl;
+    if (r.netPnl > 0) windowWin += r.netPnl; else windowLoss += r.netPnl;
+  }
+  windowNet = round2(windowNet);
+  windowWin = round2(windowWin);
+  windowLoss = round2(windowLoss);
+
+  const tMode = isTWindowMode();
+  const fromDate = tMode ? resolveTFromDate(Store.settings) : '';
+  $('#sellSummary').innerHTML = tMode ? `
+    <div class="sum-item"><div class="v ${pnlClass(windowNet)}">${fmtSign(windowNet)}</div><div class="k">做T时间净利(自${esc(fromDate)})</div></div>
+    <div class="sum-item"><div class="v c-up">${fmtSign(windowWin)}</div><div class="k">盈利合计</div></div>
+    <div class="sum-item"><div class="v c-down">${fmtSign(windowLoss)}</div><div class="k">亏损合计</div></div>` : `
     <div class="sum-item"><div class="v ${pnlClass(ap.realized)}">${fmtSign(ap.realized)}</div><div class="k">做T已实现净利</div></div>
     <div class="sum-item"><div class="v c-up">${fmtSign(ap.realizedWin)}</div><div class="k">盈利合计</div></div>
     <div class="sum-item"><div class="v c-down">${fmtSign(ap.realizedLoss)}</div><div class="k">亏损合计</div></div>`;
 
   const shown = all.filter((s) => {
+    if (tMode && s.date < fromDate) return false;
     const r = matchResult.sells.get(s.id);
     if (!r || r.matchedQty === 0) return filter === 'all';
     if (filter === 'win') return r.success;
@@ -412,7 +545,7 @@ function renderSells() {
   const html = [];
   for (const code of Array.from(byCode.keys()).sort()) {
     const list = byCode.get(code);
-    const st = codeStats(code);
+    const st = codeStats(code, matchForCode(code));
     const open = uiOpen.sells.has(code) ? ' open' : '';
     const filterLabel = filter === 'win' ? '做T成功' : filter === 'loss' ? '亏损卖出' : '卖出';
 
@@ -493,6 +626,43 @@ $$('#lotSortSeg button').forEach((b) => {
   });
 });
 
+$$('#ledgerModeSeg button').forEach((b) => {
+  b.addEventListener('click', () => {
+    Store.settings.ledgerMode = b.dataset.mode;
+    Store.save();
+    recompute();
+    renderAll();
+  });
+});
+$$('#tWindowPresetSeg button').forEach((b) => {
+  b.addEventListener('click', () => {
+    Store.settings.tWindowPreset = b.dataset.preset;
+    if (b.dataset.preset === 'custom' && !Store.settings.tFromDate) {
+      Store.settings.tFromDate = todayISO();
+    }
+    Store.save();
+    recompute();
+    renderAll();
+  });
+});
+$$('#unprofitableSeg button').forEach((b) => {
+  b.addEventListener('click', () => {
+    Store.settings.unprofitableDisplay = b.dataset.u;
+    Store.save();
+    renderAll();
+  });
+});
+const tFromDateInput = $('#tFromDateInput');
+if (tFromDateInput) {
+  tFromDateInput.addEventListener('change', () => {
+    Store.settings.tFromDate = tFromDateInput.value || todayISO();
+    Store.settings.tWindowPreset = 'custom';
+    Store.save();
+    recompute();
+    renderAll();
+  });
+}
+
 const showHiddenEl = $('#showHiddenLots');
 if (showHiddenEl) {
   showHiddenEl.addEventListener('change', () => {
@@ -501,7 +671,7 @@ if (showHiddenEl) {
     renderLedger();
     $$('#ledgerList .est-input').forEach((inp) => {
       const tr = Store.trades.find((x) => x.id === inp.dataset.id);
-      const lot = matchResult.lots.get(inp.dataset.id);
+      const lot = tr ? matchForCode(tr.code).lots.get(inp.dataset.id) : null;
       if (tr && lot) updateEstOut(inp.closest('.lot-est'), tr, lot.remainingQty);
     });
   });
@@ -539,6 +709,8 @@ function renderStats() {
   const total = win + loss;
   const rate = total ? Math.round((win / total) * 100) : 0;
   const asOf = (Store.account && Store.account.asOf) || '';
+  const tMode = isTWindowMode();
+  const fromDate = tMode ? resolveTFromDate(Store.settings) : '';
 
   const dayRows = Array.from(byDay.entries()).sort((a, b) => b[0].localeCompare(a[0]))
     .map(([d, v]) => `<tr><td>${esc(d)}</td><td class="c-up">${fmtSign(round2(v.winSum))}</td>
@@ -552,22 +724,24 @@ function renderStats() {
   $('#statsBody').innerHTML = `
     <div class="stats-hero">
       <div class="sum-item big"><div class="v ${pnlClass(ap.total)}">${fmtSign(ap.total)}</div>
-        <div class="k">账户总盈亏 = 已实现 + 持仓浮动 + 股息利息${asOf ? '（数据截至 ' + asOf + '，不含今日）' : ''}</div></div>
-      <div class="sum-item"><div class="v ${pnlClass(ap.realized)}">${fmtSign(ap.realized)}</div><div class="k">已实现(做T配对)</div></div>
+        <div class="k">账户总盈亏 = 已实现 + 持仓浮动 + 股息利息${asOf ? '（数据截至 ' + asOf + '，不含今日）' : ''}（始终全历史）</div></div>
+      ${tMode ? `<div class="sum-item big"><div class="v">${esc(fromDate)}</div>
+        <div class="k">当前台账为「做T时间」口径：下方做T表按起始日起配对；切回「整体持仓」看全貌</div></div>` : ''}
+      <div class="sum-item"><div class="v ${pnlClass(ap.realized)}">${fmtSign(ap.realized)}</div><div class="k">已实现(全历史做T配对)</div></div>
       <div class="sum-item"><div class="v ${pnlClass(ap.floatPnl)}">${fmtSign(ap.floatPnl)}</div><div class="k">持仓浮动盈亏</div></div>
       <div class="sum-item"><div class="v c-up">${fmtSign(ap.realizedWin)}</div><div class="k">做T盈利合计</div></div>
       <div class="sum-item"><div class="v c-down">${fmtSign(ap.realizedLoss)}</div><div class="k">做T亏损合计</div></div>
       <div class="sum-item"><div class="v">${fmtSign(ap.dividends + ap.interest)}</div><div class="k">股息+利息</div></div>
-      <div class="sum-item"><div class="v">${rate}%</div><div class="k">做T成功率</div></div>
+      <div class="sum-item"><div class="v">${rate}%</div><div class="k">做T成功率${tMode ? '(时间窗)' : ''}</div></div>
       <div class="sum-item"><div class="v ${pnlClass(todayNet)}">${fmtSign(round2(todayNet))}</div><div class="k">今日做T(若有)</div></div>
       ${ap.assetStyle != null ? `<div class="sum-item big"><div class="v ${pnlClass(ap.assetStyle)}">${fmtSign(ap.assetStyle)}</div>
         <div class="k">对照：总资产 ${fmt(ap.totalAssets)} − 银证净入金 ${fmt(ap.netDeposit)}（部分券商APP用此口径）</div></div>` : ''}
     </div>
     ${total ? `
-    <div class="card"><h2>按日做T（盈利/亏损金额）</h2>
+    <div class="card"><h2>按日做T（盈利/亏损金额）${tMode ? '·自 ' + esc(fromDate) : ''}</h2>
       <table class="stat-table"><tr><th>日期</th><th>盈利</th><th>亏损</th><th>净利</th></tr>${dayRows}</table>
     </div>
-    <div class="card"><h2>按标的做T（盈利/亏损金额）</h2>
+    <div class="card"><h2>按标的做T（盈利/亏损金额）${tMode ? '·自 ' + esc(fromDate) : ''}</h2>
       <table class="stat-table"><tr><th>标的</th><th>盈利</th><th>亏损</th><th>净利</th></tr>${codeRows}</table>
     </div>` : '<div class="empty">还没有已配对的卖出记录</div>'}`;
 }
@@ -736,7 +910,7 @@ function renderAll() {
   // 台账渲染后填充各笔预计利润
   $$('#ledgerList .est-input').forEach((inp) => {
     const t = Store.trades.find((x) => x.id === inp.dataset.id);
-    const lot = matchResult.lots.get(inp.dataset.id);
+    const lot = t ? matchForCode(t.code).lots.get(inp.dataset.id) : null;
     if (t && lot) updateEstOut(inp.closest('.lot-est'), t, lot.remainingQty);
   });
   renderSells();

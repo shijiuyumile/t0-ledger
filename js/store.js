@@ -27,6 +27,10 @@ const Store = {
     if (!s.sellFilter) s.sellFilter = 'loss';
     if (!s.quotes) s.quotes = {};
     if (s.showHiddenLots == null) s.showHiddenLots = false;
+    if (!s.ledgerMode) s.ledgerMode = 'full'; // full | tWindow
+    if (!s.tWindowPreset) s.tWindowPreset = 'd5';
+    if (s.tFromDate == null) s.tFromDate = '';
+    if (!s.unprofitableDisplay) s.unprofitableDisplay = 'tWindow'; // tWindow | full
     return this.data;
   },
 

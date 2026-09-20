@@ -10,20 +10,29 @@ function tradeTimeKey(t) {
   return (t.date || '') + ' ' + (t.time || '00:00:00');
 }
 
-function computeMatches(trades) {
+/**
+ * @param {object[]} trades
+ * @param {{ fromDate?: string }} [opts] 若设 fromDate(YYYY-MM-DD)：
+ *   - 该日之前的买单视为底仓，不参与配对
+ *   - 该日之前的卖单不参与本口径核销（仅做T时间视图用）
+ */
+function computeMatches(trades, opts) {
+  const fromDate = opts && opts.fromDate ? String(opts.fromDate) : '';
   const lots = new Map();
   const sells = new Map();
   const buysByCode = new Map();
 
   for (const t of trades) {
     if (t.side !== 'buy') continue;
-    lots.set(t.id, { remainingQty: t.qty, matchedQty: 0, matches: [] });
+    const isBase = !!(fromDate && t.date < fromDate);
+    lots.set(t.id, { remainingQty: t.qty, matchedQty: 0, matches: [], isBase });
+    if (isBase) continue;
     if (!buysByCode.has(t.code)) buysByCode.set(t.code, []);
     buysByCode.get(t.code).push(t);
   }
 
   const sellTrades = trades
-    .filter((t) => t.side === 'sell')
+    .filter((t) => t.side === 'sell' && (!fromDate || t.date >= fromDate))
     .sort((a, b) => tradeTimeKey(a).localeCompare(tradeTimeKey(b)) || (a.seq || 0) - (b.seq || 0));
 
   for (const sell of sellTrades) {
