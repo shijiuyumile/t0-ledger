@@ -276,20 +276,83 @@ function estimateLotProfit(buyTrade, remainingQty, estPrice, feeRules) {
 }
 
 /**
- * 账户总盈亏（对齐券商常见口径）：
- * 总盈亏 = 已实现盈亏(卖出配对净利) + 持仓浮动盈亏 + 股息 + 利息
+ * 移动加权平均成本已实现（对齐涨乐等券商常见口径）。
+ * 买入：成本 += 成交额 + 费用；卖出：按均价释放成本，净收款 − 成本 = 已实现；
+ * 持仓归零则成本清零，之后再买重新起算（清仓后再买入不会跨段配对）。
  */
-function computeAccountPnl(trades, matchResult, account) {
+function computeMovingAvgPnl(trades) {
+  const pos = new Map(); // code -> { qty, costAmt }
   let realized = 0;
   let realizedWin = 0;
   let realizedLoss = 0;
-  for (const t of trades) {
+  const byCode = {};
+
+  const sorted = (trades || []).slice().sort((a, b) =>
+    tradeTimeKey(a).localeCompare(tradeTimeKey(b)) || ((a.seq || 0) - (b.seq || 0)));
+
+  for (const t of sorted) {
+    if (!t || !t.code) continue;
+    if (t.side === 'buy') {
+      const p = pos.get(t.code) || { qty: 0, costAmt: 0 };
+      const gross = (Number(t.amount) > 0 ? Number(t.amount) : t.price * t.qty);
+      p.costAmt += gross + totalFees(t.fees);
+      p.qty += t.qty;
+      pos.set(t.code, p);
+      continue;
+    }
     if (t.side !== 'sell') continue;
-    const r = matchResult.sells.get(t.id);
-    if (!r || r.matchedQty === 0) continue;
-    realized += r.netPnl;
-    if (r.netPnl > 0) realizedWin += r.netPnl;
-    else realizedLoss += r.netPnl;
+
+    const p = pos.get(t.code) || { qty: 0, costAmt: 0 };
+    const sellQty = t.qty;
+    const useQty = p.qty > 1e-8 ? Math.min(sellQty, p.qty) : 0;
+    const avg = useQty > 0 ? p.costAmt / p.qty : 0;
+    const costRelief = avg * useQty;
+    const gross = (Number(t.amount) > 0 ? Number(t.amount) : t.price * t.qty);
+    const proceedsAll = gross - totalFees(t.fees);
+    const proceeds = useQty > 0 && sellQty > 0 ? proceedsAll * (useQty / sellQty) : 0;
+    const pnl = round2(proceeds - costRelief);
+
+    realized += pnl;
+    if (pnl > 0) realizedWin += pnl;
+    else if (pnl < 0) realizedLoss += pnl;
+    byCode[t.code] = round2((byCode[t.code] || 0) + pnl);
+
+    p.costAmt -= costRelief;
+    p.qty -= useQty;
+    if (p.qty < 1e-8) {
+      p.qty = 0;
+      p.costAmt = 0;
+    }
+    pos.set(t.code, p);
+  }
+
+  return {
+    realized: round2(realized),
+    realizedWin: round2(realizedWin),
+    realizedLoss: round2(realizedLoss),
+    byCode,
+  };
+}
+
+/**
+ * 账户总盈亏（对齐券商移动均价口径）：
+ * 总盈亏 = 移动均价已实现 + 持仓浮动 + 股息 + 利息
+ * matchResult 仅用于附带「做T配对净利」对照，不参与账户总盈亏。
+ */
+function computeAccountPnl(trades, matchResult, account) {
+  const avg = computeMovingAvgPnl(trades);
+  let matchRealized = 0;
+  let matchRealizedWin = 0;
+  let matchRealizedLoss = 0;
+  if (matchResult && matchResult.sells) {
+    for (const t of trades) {
+      if (t.side !== 'sell') continue;
+      const r = matchResult.sells.get(t.id);
+      if (!r || r.matchedQty === 0) continue;
+      matchRealized += r.netPnl;
+      if (r.netPnl > 0) matchRealizedWin += r.netPnl;
+      else matchRealizedLoss += r.netPnl;
+    }
   }
 
   let floatPnl = 0;
@@ -309,6 +372,7 @@ function computeAccountPnl(trades, matchResult, account) {
   floatPnl = round2(floatPnl);
   const dividends = (account && account.dividends) || 0;
   const interest = (account && account.interest) || 0;
+  const realized = avg.realized;
   const total = round2(realized + floatPnl + dividends + interest);
   const netDeposit = account ? account.netDeposit : null;
   const totalAssets = account ? account.totalAssets : null;
@@ -317,8 +381,11 @@ function computeAccountPnl(trades, matchResult, account) {
 
   return {
     realized: round2(realized),
-    realizedWin: round2(realizedWin),
-    realizedLoss: round2(realizedLoss),
+    realizedWin: round2(avg.realizedWin),
+    realizedLoss: round2(avg.realizedLoss),
+    matchRealized: round2(matchRealized),
+    matchRealizedWin: round2(matchRealizedWin),
+    matchRealizedLoss: round2(matchRealizedLoss),
     floatPnl,
     dividends: round2(dividends),
     interest: round2(interest),
@@ -326,5 +393,6 @@ function computeAccountPnl(trades, matchResult, account) {
     assetStyle,
     totalAssets,
     netDeposit,
+    realizedMethod: 'movingAvg',
   };
 }

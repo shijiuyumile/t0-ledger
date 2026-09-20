@@ -131,7 +131,7 @@
 
       <div class="card">
         <h2>做T核销口径</h2>
-        <p class="hint">默认「价格最相近」与以前一致。可切换为「时间顺序」：先买后卖按 FIFO；先卖无买单则进「待回补」，之后买入优先回补。账户总盈亏随所选口径的已实现部分变化。</p>
+        <p class="hint">默认「价格最相近」与以前一致。可切换为「时间顺序」：先买后卖按 FIFO；先卖无买单则进「待回补」，之后买入优先回补。核销只影响做T配对分析；账户总盈亏固定用移动均价（对齐涨乐）。</p>
         <div class="seg seg-wrap" id="matchModeSeg">
           <button type="button" data-mode="closest">价格最相近（默认）</button>
           <button type="button" data-mode="time">时间顺序+待回补</button>

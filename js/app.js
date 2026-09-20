@@ -269,7 +269,7 @@ function codeStats(code, mr) {
 
 function accountPnl() {
   const acc = Store.account ? Object.assign({}, Store.account, { quotes: Store.settings.quotes }) : { holdings: [], quotes: Store.settings.quotes };
-  // 账户已实现随当前核销口径；浮动/股息仍用对账单
+  // 账户已实现 = 移动均价（对齐涨乐）；做T配对净利见 ap.matchRealized
   return computeAccountPnl(Store.trades, fullMatchResult, acc);
 }
 
@@ -758,7 +758,7 @@ function renderLedger() {
   const ap = accountPnl();
   const modeLabel = tMode ? '做T时间' : '整体持仓';
   $('#ledgerSummary').innerHTML = `
-    <div class="sum-item"><div class="v ${pnlClass(ap.total)}">${fmtSign(ap.total)}</div><div class="k">账户总盈亏</div></div>
+    <div class="sum-item"><div class="v ${pnlClass(ap.total)}">${fmtSign(ap.total)}</div><div class="k">账户总盈亏·移动均价</div></div>
     <div class="sum-item"><div class="v">${groups.size}</div><div class="k">持仓标的</div></div>
     <div class="sum-item"><div class="v">${totalLots}${hiddenCount && !showHidden ? `<span style="font-size:11px;font-weight:500;color:var(--text2)">/${hiddenCount}隐</span>` : ''}</div><div class="k">待做T·${modeLabel}</div></div>`;
 
@@ -945,9 +945,9 @@ function renderSells() {
     <div class="sum-item"><div class="v ${pnlClass(windowNet)}">${fmtSign(windowNet)}</div><div class="k">做T时间净利(自${esc(fromDate)})</div></div>
     <div class="sum-item"><div class="v c-up">${fmtSign(windowWin)}</div><div class="k">盈利合计</div></div>
     <div class="sum-item"><div class="v c-down">${fmtSign(windowLoss)}</div><div class="k">亏损合计</div></div>` : `
-    <div class="sum-item"><div class="v ${pnlClass(ap.realized)}">${fmtSign(ap.realized)}</div><div class="k">做T已实现净利</div></div>
-    <div class="sum-item"><div class="v c-up">${fmtSign(ap.realizedWin)}</div><div class="k">盈利合计</div></div>
-    <div class="sum-item"><div class="v c-down">${fmtSign(ap.realizedLoss)}</div><div class="k">亏损合计</div></div>`;
+    <div class="sum-item"><div class="v ${pnlClass(ap.matchRealized)}">${fmtSign(ap.matchRealized)}</div><div class="k">做T配对净利</div></div>
+    <div class="sum-item"><div class="v c-up">${fmtSign(ap.matchRealizedWin)}</div><div class="k">盈利合计</div></div>
+    <div class="sum-item"><div class="v c-down">${fmtSign(ap.matchRealizedLoss)}</div><div class="k">亏损合计</div></div>`;
 
   const shown = all.filter((s) => {
     if (tMode && s.date < fromDate) return false;
@@ -1246,20 +1246,19 @@ function renderStats() {
   $('#statsBody').innerHTML = `
     <div class="stats-hero">
       <div class="sum-item big"><div class="v ${pnlClass(ap.total)}">${fmtSign(ap.total)}</div>
-        <div class="k">账户总盈亏 = 已实现 + 持仓浮动 + 股息利息${asOf ? '（数据截至 ' + asOf + '，不含今日）' : ''}（始终全历史）</div></div>
+        <div class="k">账户总盈亏 = 移动均价已实现 + 持仓浮动 + 股息利息${asOf ? '（数据截至 ' + asOf + '，不含今日）' : ''} · 对齐涨乐成本口径</div></div>
       ${tMode ? `<div class="sum-item big"><div class="v">${esc(fromDate)}</div>
         <div class="k">当前台账为「做T时间」口径：下方做T表按起始日起配对；切回「整体持仓」看全貌</div></div>` : ''}
-      <div class="sum-item"><div class="v">${currentMatchMode() === 'time' ? '时间顺序' : '价格最相近'}</div>
-        <div class="k">核销口径（在「我的」切换）</div></div>
-      <div class="sum-item"><div class="v ${pnlClass(ap.realized)}">${fmtSign(ap.realized)}</div><div class="k">已实现(当前核销·全历史)</div></div>
+      <div class="sum-item"><div class="v ${pnlClass(ap.realized)}">${fmtSign(ap.realized)}</div><div class="k">已实现·移动均价（对齐券商）</div></div>
       <div class="sum-item"><div class="v ${pnlClass(ap.floatPnl)}">${fmtSign(ap.floatPnl)}</div><div class="k">持仓浮动盈亏</div></div>
-      <div class="sum-item"><div class="v c-up">${fmtSign(ap.realizedWin)}</div><div class="k">做T盈利合计</div></div>
-      <div class="sum-item"><div class="v c-down">${fmtSign(ap.realizedLoss)}</div><div class="k">做T亏损合计</div></div>
       <div class="sum-item"><div class="v">${fmtSign(ap.dividends + ap.interest)}</div><div class="k">股息+利息</div></div>
+      <div class="sum-item"><div class="v ${pnlClass(ap.matchRealized)}">${fmtSign(ap.matchRealized)}</div><div class="k">做T配对净利（${currentMatchMode() === 'time' ? '时间序' : '价格相近'}·分析用）</div></div>
+      <div class="sum-item"><div class="v c-up">${fmtSign(ap.matchRealizedWin)}</div><div class="k">做T盈利合计</div></div>
+      <div class="sum-item"><div class="v c-down">${fmtSign(ap.matchRealizedLoss)}</div><div class="k">做T亏损合计</div></div>
       <div class="sum-item"><div class="v">${rate}%</div><div class="k">做T成功率${tMode ? '(时间窗)' : ''}</div></div>
       <div class="sum-item"><div class="v ${pnlClass(todayNet)}">${fmtSign(round2(todayNet))}</div><div class="k">今日做T(若有)</div></div>
       ${ap.assetStyle != null ? `<div class="sum-item big"><div class="v ${pnlClass(ap.assetStyle)}">${fmtSign(ap.assetStyle)}</div>
-        <div class="k">对照：总资产 ${fmt(ap.totalAssets)} − 银证净入金 ${fmt(ap.netDeposit)}（部分券商APP用此口径）</div></div>` : ''}
+        <div class="k">对照：总资产 ${fmt(ap.totalAssets)} − 银证净入金 ${fmt(ap.netDeposit)}（资金口径，通常≠涨乐「累计收益」）</div></div>` : ''}
     </div>
     ${total ? `
     <div class="card"><h2>按日做T（盈利/亏损金额）${tMode ? '·自 ' + esc(fromDate) : ''}</h2>
