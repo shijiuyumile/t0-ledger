@@ -335,9 +335,10 @@ function computeMovingAvgPnl(trades) {
 }
 
 /**
- * 账户总盈亏（对齐券商移动均价口径）：
- * 总盈亏 = 移动均价已实现 + 持仓浮动 + 股息 + 利息
- * matchResult 仅用于附带「做T配对净利」对照，不参与账户总盈亏。
+ * 账户总盈亏：
+ * - 主数字优先 = 总资产 − 银证净入金（与涨乐「我的收益」同款，含股票/债券/省心投/现金）
+ * - 另附移动均价已实现 + 股票持仓浮动 + 股息利息，作证券估算对照
+ * matchResult 仅用于「做T配对净利」副指标。
  */
 function computeAccountPnl(trades, matchResult, account) {
   const avg = computeMovingAvgPnl(trades);
@@ -373,11 +374,13 @@ function computeAccountPnl(trades, matchResult, account) {
   const dividends = (account && account.dividends) || 0;
   const interest = (account && account.interest) || 0;
   const realized = avg.realized;
-  const total = round2(realized + floatPnl + dividends + interest);
+  const componentsTotal = round2(realized + floatPnl + dividends + interest);
   const netDeposit = account ? account.netDeposit : null;
   const totalAssets = account ? account.totalAssets : null;
   const assetStyle = (totalAssets != null && netDeposit != null)
     ? round2(totalAssets - netDeposit) : null;
+  // 有资产口径时与涨乐对齐；否则退回证券估算
+  const total = assetStyle != null ? assetStyle : componentsTotal;
 
   return {
     realized: round2(realized),
@@ -389,10 +392,11 @@ function computeAccountPnl(trades, matchResult, account) {
     floatPnl,
     dividends: round2(dividends),
     interest: round2(interest),
+    componentsTotal,
     total,
     assetStyle,
     totalAssets,
     netDeposit,
-    realizedMethod: 'movingAvg',
+    realizedMethod: assetStyle != null ? 'assetMinusNetDeposit' : 'movingAvg',
   };
 }

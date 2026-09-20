@@ -29,11 +29,26 @@ function extractAccount(grid) {
     }
   }
   let deposit = 0, withdraw = 0, dividends = 0, interest = 0;
+  const transferKeys = [];
+  const transferOcc = new Map(); // date|type|amt -> count for stable keys
   for (let i = 0; i < grid.length; i++) {
     const summary = String(grid[i][5] || '').replace(/\n/g, '');
     const amt = Number(grid[i][11]) || 0;
-    if (summary === '银行转存') deposit += amt;
-    if (summary === '银行转取') withdraw += Math.abs(amt);
+    const date = String(grid[i][0] || '').replace(/\D/g, '').slice(0, 8);
+    if (summary === '银行转存') {
+      deposit += amt;
+      const base = date + '|in|' + amt;
+      const occ = transferOcc.get(base) || 0;
+      transferOcc.set(base, occ + 1);
+      transferKeys.push(base + '#' + occ);
+    }
+    if (summary === '银行转取') {
+      withdraw += Math.abs(amt);
+      const base = date + '|out|' + Math.abs(amt);
+      const occ = transferOcc.get(base) || 0;
+      transferOcc.set(base, occ + 1);
+      transferKeys.push(base + '#' + occ);
+    }
     if (summary === '股息入帐') dividends += amt;
     if (summary === '利息归本') interest += amt;
   }
@@ -83,6 +98,7 @@ function extractAccount(grid) {
     interest: round2(interest),
     holdings,
     holdPnlTotal: holdPnlTotal == null ? null : round2(holdPnlTotal),
+    transferKeys,
     quotes: {},
   };
 }
@@ -137,18 +153,39 @@ for (const t of fresh) {
 
 const periodAccount = extractAccount(grid);
 const oldAcc = seed.account || {};
+// 银证转入/转出按 key 去重，避免重叠账单重复累加（历史上曾因此多计约 7000）
+let depositAdd = 0;
+let withdrawAdd = 0;
+let transferSkipped = 0;
+const seenNow = new Set(oldAcc.seenTransfers || []);
+for (const key of periodAccount.transferKeys || []) {
+  if (seenNow.has(key)) {
+    transferSkipped++;
+    continue;
+  }
+  seenNow.add(key);
+  const parts = key.split('|');
+  const type = parts[1];
+  const amt = Number(String(parts[2] || '').split('#')[0]) || 0;
+  if (type === 'in') depositAdd += amt;
+  else withdrawAdd += amt;
+}
+depositAdd = round2(depositAdd);
+withdrawAdd = round2(withdrawAdd);
+
 // 新账单的银证/股息是「本期」增量，要累加到历史快照；持仓/资产以最新账单为准
 seed.account = {
   asOf: periodAccount.asOf,
   cash: periodAccount.cash,
   totalAssets: periodAccount.totalAssets,
-  deposit: round2((oldAcc.deposit || 0) + periodAccount.deposit),
-  withdraw: round2((oldAcc.withdraw || 0) + periodAccount.withdraw),
-  netDeposit: round2((oldAcc.netDeposit || 0) + periodAccount.netDeposit),
+  deposit: round2((oldAcc.deposit || 0) + depositAdd),
+  withdraw: round2((oldAcc.withdraw || 0) + withdrawAdd),
+  netDeposit: round2((oldAcc.netDeposit || 0) + depositAdd - withdrawAdd),
   dividends: round2((oldAcc.dividends || 0) + periodAccount.dividends),
   interest: round2((oldAcc.interest || 0) + periodAccount.interest),
   holdings: periodAccount.holdings,
   holdPnlTotal: periodAccount.holdPnlTotal,
+  seenTransfers: Array.from(seenNow),
   quotes: oldAcc.quotes || {},
 };
 seed.seedRevision = (seed.seedRevision || 1) + 1;
@@ -158,3 +195,5 @@ console.log('新增成交', added, '跳过重复', skipped, '忽略非成交', s
 console.log('总成交', seed.trades.length, 'seedRevision', seed.seedRevision);
 console.log('账户截至', seed.account.asOf, '总资产', seed.account.totalAssets, '资金', seed.account.cash);
 console.log('持仓数', seed.account.holdings.length, '账单持仓盈亏合计', seed.account.holdPnlTotal, '累计净入金', seed.account.netDeposit);
+console.log('本期银证新增 转入', depositAdd, '转出', withdrawAdd, '跳过重复银证', transferSkipped);
+console.log('账户总盈亏(资产−净入金)', round2(seed.account.totalAssets - seed.account.netDeposit));
