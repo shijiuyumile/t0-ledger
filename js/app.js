@@ -253,15 +253,42 @@ function pendingCoversForView() {
   return (matchResult && matchResult.pendingCovers) || [];
 }
 
+/** 参考价：手填 > 账单持仓 lastPrice > 最近成交价 */
+function refPriceForCode(code) {
+  const manual = Number(Store.settings.quotes[code]);
+  if (manual > 0) return { price: manual, source: 'hand' };
+  const h = ((Store.account && Store.account.holdings) || []).find((x) => x.code === code);
+  if (h && Number(h.lastPrice) > 0) return { price: Number(h.lastPrice), source: 'statement' };
+  let latest = null;
+  for (const t of Store.trades) {
+    if (t.code !== code) continue;
+    if (!latest || tradeTimeKey(t) >= tradeTimeKey(latest)) latest = t;
+  }
+  if (latest && latest.price > 0) return { price: latest.price, source: 'trade' };
+  return { price: 0, source: 'none' };
+}
+
+function refPriceSourceLabel(source) {
+  if (source === 'hand') return '手填';
+  if (source === 'statement') return '账单';
+  if (source === 'trade') return '最近成交';
+  return '';
+}
+
 function renderCoverAndWatch() {
   const coverBox = $('#coverList');
   const watchBox = $('#watchList');
   if (!coverBox || !watchBox) return;
 
+  const asOf = (Store.account && Store.account.asOf) || '';
   const covers = currentMatchMode() === 'time' ? pendingCoversForView() : [];
-  if (!covers.length) {
+  if (currentMatchMode() !== 'time') {
     coverBox.hidden = true;
     coverBox.innerHTML = '';
+  } else if (!covers.length) {
+    coverBox.hidden = false;
+    coverBox.innerHTML = `<div class="section-label">待回补（先卖后买）</div>
+      <div class="hint">当前没有待回补。整体持仓下也会统计全历史先卖未买回的数量；有的话会出现在这里。</div>`;
   } else {
     coverBox.hidden = false;
     const byCode = new Map();
@@ -269,19 +296,42 @@ function renderCoverAndWatch() {
       if (!byCode.has(c.code)) byCode.set(c.code, []);
       byCode.get(c.code).push(c);
     }
-    coverBox.innerHTML = `<div class="section-label">待回补（先卖后买）· ${covers.length} 笔</div>` +
-      Array.from(byCode.entries()).sort((a, b) => a[0].localeCompare(b[0])).map(([code, list]) => `
-        <div class="cover-group">
-          <div class="cover-group-title">${esc(displayName(code))} <span class="g-code">${esc(code)}</span></div>
-          ${list.map((c) => `
-            <div class="cover-row">
+    coverBox.innerHTML = `<div class="section-label">待回补（先卖后买）· ${covers.length} 笔${asOf ? ` · 参考价截至 ${esc(asOf)}` : ''}</div>` +
+      Array.from(byCode.entries()).sort((a, b) => a[0].localeCompare(b[0])).map(([code, list]) => {
+        const ref = refPriceForCode(code);
+        const refTxt = ref.price > 0
+          ? `参考价 ${fmt(ref.price, 3)}（${refPriceSourceLabel(ref.source)}）`
+          : '暂无参考价';
+        return `<div class="cover-group">
+          <div class="cover-group-title">${esc(displayName(code))} <span class="g-code">${esc(code)}</span>
+            <span class="cover-ref">${refTxt}</span>
+          </div>
+          ${list.map((c) => {
+            let advice = '';
+            let adviceCls = 'cover-advice';
+            if (!(ref.price > 0)) {
+              advice = '暂无账单价，可在下方标的里手填现价';
+              adviceCls += ' cover-advice-muted';
+            } else {
+              const diff = round2(c.price - ref.price);
+              if (ref.price < c.price) {
+                advice = `可考虑回补 · 参考价低于待回补 ${fmt(diff, 3)}`;
+                adviceCls += ' cover-advice-ok';
+              } else {
+                advice = `不宜回补 · 参考价已不低于待回补（差 ${fmt(Math.abs(diff), 3)}）`;
+                adviceCls += ' cover-advice-bad';
+              }
+            }
+            return `<div class="cover-row">
               <span class="tag tag-warn">待回补</span>
               <span class="lot-price">${fmt(c.price, 3)}</span>
               <span class="lot-qty">${fmt(c.qty, 0)}股</span>
               <span class="lot-date">${esc(c.date)} ${esc(c.time || '')}</span>
-              <span class="hint-inline">买回低于此价≈倒T盈利</span>
-            </div>`).join('')}
-        </div>`).join('');
+              <div class="${adviceCls}">${advice}</div>
+            </div>`;
+          }).join('')}
+        </div>`;
+      }).join('');
   }
 
   const watches = Store.settings.watchPrices || [];
@@ -291,14 +341,22 @@ function renderCoverAndWatch() {
   } else {
     watchBox.hidden = false;
     watchBox.innerHTML = `<div class="section-label">扳本关注价 · ${watches.length}</div>` +
-      watches.map((w) => `
-        <div class="watch-row" data-id="${esc(w.id)}">
+      watches.map((w) => {
+        const ref = refPriceForCode(w.code);
+        const tip = ref.price > 0
+          ? (ref.price < w.price
+            ? `<span class="cover-advice-ok">参考 ${fmt(ref.price, 3)} 低于关注价</span>`
+            : `<span class="cover-advice-bad">参考 ${fmt(ref.price, 3)} 已不低于关注价</span>`)
+          : '';
+        return `<div class="watch-row" data-id="${esc(w.id)}">
           <span class="g-name">${esc(displayName(w.code))}</span>
           <span class="g-code">${esc(w.code)}</span>
           <span class="lot-price">${fmt(w.price, 3)}</span>
           <span class="lot-date">${esc(w.date || '')}</span>
+          ${tip}
           <button type="button" class="btn btn-mini" data-act="del-watch" data-id="${esc(w.id)}">移除</button>
-        </div>`).join('');
+        </div>`;
+      }).join('');
     $$('#watchList [data-act="del-watch"]').forEach((b) => {
       b.addEventListener('click', () => {
         Store.settings.watchPrices = (Store.settings.watchPrices || []).filter((x) => x.id !== b.dataset.id);
@@ -490,6 +548,7 @@ function renderLedger() {
         el.textContent = fmtSign(st.floatPnl);
         el.className = 'v float-v ' + pnlClass(st.floatPnl);
       }
+      renderCoverAndWatch();
     });
   });
   $$('#ledgerList [data-act="cycle-type"]').forEach((b) => {
@@ -780,14 +839,30 @@ $$('#matchModeSeg button').forEach((b) => {
     syncMatchModeUI();
   });
 });
+$$('#ledgerMatchModeSeg button').forEach((b) => {
+  b.addEventListener('click', () => {
+    Store.settings.matchMode = b.dataset.mode;
+    Store.save();
+    recompute();
+    renderAll();
+    syncMatchModeUI();
+  });
+});
 function syncMatchModeUI() {
   const mode = currentMatchMode();
   $$('#matchModeSeg button').forEach((b) => b.classList.toggle('active', b.dataset.mode === mode));
+  $$('#ledgerMatchModeSeg button').forEach((b) => b.classList.toggle('active', b.dataset.mode === mode));
   const hint = $('#matchModeHint');
   if (hint) {
     hint.textContent = mode === 'time'
-      ? '当前：时间顺序。台账会显示「待回补」；默认可随时切回价格最相近。'
+      ? '当前：时间顺序。台账会显示「待回补」；对照账单参考价判断是否可回补。默认可随时切回价格最相近。'
       : '当前：价格最相近（与 v1.0 稳定版习惯一致）。';
+  }
+  const ledgerHint = $('#ledgerMatchHint');
+  if (ledgerHint) {
+    ledgerHint.textContent = mode === 'time'
+      ? '已开「时间+待回补」：整体持仓无需再设做T时间也会看待回补；参考价来自最近对账单（非实时）。'
+      : '默认价格匹配。要点看待回补：点「时间+待回补」即可（可留在整体持仓）。';
   }
 }
 const tFromDateInput = $('#tFromDateInput');

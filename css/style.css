@@ -157,13 +157,25 @@ body {
 .watch-list { background: #f3f8ff; border-color: #d5e3f7; }
 .cover-group { margin-bottom: 8px; }
 .cover-group:last-child { margin-bottom: 0; }
-.cover-group-title { font-size: 14px; font-weight: 700; margin-bottom: 4px; }
+.cover-group-title {
+  font-size: 14px; font-weight: 700; margin-bottom: 4px;
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px;
+}
+.cover-ref { font-size: 12px; font-weight: 500; color: var(--text2); }
 .cover-row, .watch-row {
   display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
   padding: 6px 0; border-top: 0.5px dashed var(--line);
   font-size: 13px;
 }
 .cover-row:first-of-type, .watch-row:first-of-type { border-top: 0; }
+.cover-advice {
+  flex: 1 1 100%;
+  font-size: 12px; font-weight: 600;
+  margin-top: 2px;
+}
+.cover-advice-ok { color: #0a7a3e; }
+.cover-advice-bad { color: var(--up); }
+.cover-advice-muted { color: var(--text2); font-weight: 500; }
 
 /* 买单条目 */
 .lot { padding: 12px 14px; border-bottom: 0.5px solid var(--line); }

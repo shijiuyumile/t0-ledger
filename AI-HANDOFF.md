@@ -95,8 +95,11 @@ t0-ledger/
 | `tWindowPreset` | `today` / `d2`…`d5` / `halfMonth` / `month` / `quarter` / `custom` |
 | `tFromDate` | 自定义起始日 `YYYY-MM-DD` |
 | `unprofitableDisplay` | `tWindow`（默认）\| `full`：未盈利标的跟时间窗还是看整体仓 |
-| `matchMode` | `closest`（默认）\| `time`：核销口径 |
+| `matchMode` | `closest`（默认）\| `time`：核销口径；台账顶栏与「我的」均可切换 |
 | `watchPrices` | 扳本关注价数组 `{id,code,price,date,fromSellId}` |
+
+待回补参考价优先级：手填 `quotes[code]` → 账单 `holdings.lastPrice` → 该代码最近成交价；界面标注账单 `asOf`。
+
 
 - **未盈利**：该标的**历史累计**做T已实现净利 ≤ 0（全历史配对口径，不随时间窗变）。
 - 做T时间模式下：起始日前底仓默认不显示；未盈利且 `unprofitableDisplay=full` 时该标的按全历史剩余仓显示。
