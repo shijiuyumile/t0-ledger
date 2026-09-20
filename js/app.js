@@ -341,22 +341,84 @@ function breakevenHelpHtml(sellTrade, realizedNetPnl) {
   const pairHint = r && r.pairs && r.pairs.length
     ? `配对买价 ${r.pairs.map((p) => fmt(p.buyPrice, 3)).join('/')}`
     : '';
+  const quoteRow = `<div class="ref-quote-row">${refQuoteInputHtml(sellTrade.code)}</div>`;
   if (!(ref.price > 0)) {
-    return `<div class="decision-card">
-      <div class="decision-title">扳本参考（估算）</div>
+    return `<div class="decision-card decision-card-be">
+      <div class="decision-title"><span class="be-badge">扳本</span> 卖亏回本参考（估算）</div>
       <div>已实现亏损 <span class="c-down">${fmtSign(-absLoss)}</span>${pairHint ? ' · ' + pairHint : ''}</div>
-      <div class="hint">填/有参考价后，可估算「再买后要卖到多少才回本」</div>
+      ${quoteRow}
+      <div class="hint">填入最新价后，可估算「再买后要卖到多少才回本」</div>
     </div>`;
   }
   const be = estimateBreakevenSellPrice(absLoss, qty, ref.price, secType);
   if (be == null) return '';
-  return `<div class="decision-card">
-    <div class="decision-title">扳本参考（估算）</div>
+  return `<div class="decision-card decision-card-be">
+    <div class="decision-title"><span class="be-badge">扳本</span> 卖亏回本参考（估算）</div>
     <div>已实现亏损 <span class="c-down">${fmtSign(-absLoss)}</span>${pairHint ? ' · ' + pairHint : ''}</div>
-    <div>若按参考价 <b>${fmt(ref.price, 3)}</b> 再买 ${fmt(qty, 0)} 股，
+    ${quoteRow}
+    <div>若按最新价 <b>${fmt(ref.price, 3)}</b> 再买 ${fmt(qty, 0)} 股，
       卖到约 <b class="c-up">${fmt(be, 3)}</b> 以上可弥补上次亏损</div>
-    <div class="hint">费用按当前费率估算；不是实时行情</div>
+    <div class="hint">费用按当前费率估算；改最新价后全页联动刷新</div>
   </div>`;
+}
+
+/** 手填最新价（优先于账单价）；改价后全页相关试算一起更新 */
+let quoteRefreshTimer = null;
+function setRefQuote(code, raw, opts) {
+  const v = parseFloat(raw);
+  if (raw === '' || raw == null || isNaN(v) || v <= 0) {
+    delete Store.settings.quotes[code];
+  } else {
+    Store.settings.quotes[code] = v;
+  }
+  Store.save();
+  const active = document.activeElement;
+  const keepCode = active && active.classList && active.classList.contains('ref-quote-input')
+    ? active.dataset.code : null;
+  const sel = active && typeof active.selectionStart === 'number' ? active.selectionStart : null;
+  const run = () => {
+    renderAll();
+    if (!keepCode) return;
+    const el = $('.ref-quote-input[data-code="' + keepCode + '"]');
+    if (!el) return;
+    el.focus();
+    if (sel != null) {
+      try { el.setSelectionRange(sel, sel); } catch (e) { /* ignore */ }
+    }
+  };
+  if (opts && opts.immediate) {
+    clearTimeout(quoteRefreshTimer);
+    run();
+    return;
+  }
+  clearTimeout(quoteRefreshTimer);
+  quoteRefreshTimer = setTimeout(run, 180);
+}
+
+function refQuoteInputHtml(code) {
+  const ref = refPriceForCode(code);
+  const manual = Number(Store.settings.quotes[code]);
+  const shown = manual > 0 ? manual : (ref.price > 0 ? ref.price : '');
+  const src = manual > 0 ? '手填优先' : (ref.source === 'statement' ? '账单价可改' : (ref.source === 'trade' ? '最近成交可改' : '填最新价'));
+  return `<label class="ref-quote-edit">最新价
+    <input class="ref-quote-input" type="number" step="0.001" min="0" data-code="${esc(code)}"
+      value="${shown === '' ? '' : shown}" placeholder="输入实时价">
+    <span class="ref-quote-src">${src}</span>
+  </label>`;
+}
+
+function bindRefQuoteInputs(root) {
+  $$('.ref-quote-input', root || document).forEach((inp) => {
+    inp.addEventListener('click', (e) => e.stopPropagation());
+    inp.addEventListener('input', () => setRefQuote(inp.dataset.code, inp.value));
+    inp.addEventListener('change', () => setRefQuote(inp.dataset.code, inp.value, { immediate: true }));
+  });
+}
+
+function coverSecType(code, list) {
+  if (list && list[0] && list[0].secType) return list[0].secType;
+  const t = Store.trades.find((x) => x.code === code);
+  return (t && t.secType) || guessSecType(code);
 }
 
 function renderCoverAndWatch() {
@@ -372,8 +434,8 @@ function renderCoverAndWatch() {
         <summary>待回补 / 扳本怎么区分？</summary>
         <ul>
           <li><b>待回补</b>：先卖、当时没有可配多头，等买回（倒T）。看回补上限与预估倒T净利。</li>
-          <li><b>卖亏扳本</b>：已经配对亏损的卖出。看「卖出」页或下方关注价里的已亏金额与扳本卖出价。</li>
-          <li>两者不是同一张账，不要混用。</li>
+          <li><b>卖亏扳本</b>：已经配对亏损的卖出。看「卖出」页亏损单上的「扳本」卡片，或钉到关注价。</li>
+          <li>两者不是同一张账；可以都看，但分开算。</li>
         </ul>
       </details>`;
     } else {
@@ -398,32 +460,44 @@ function renderCoverAndWatch() {
       if (!byCode.has(c.code)) byCode.set(c.code, []);
       byCode.get(c.code).push(c);
     }
-    coverBox.innerHTML = `<div class="section-label">待回补（倒T·先卖后买）· ${covers.length} 笔${asOf ? ` · 参考价截至 ${esc(asOf)}` : ''}</div>` +
-      Array.from(byCode.entries()).sort((a, b) => a[0].localeCompare(b[0])).map(([code, list]) => {
+    const codes = Array.from(byCode.keys()).sort();
+    coverBox.innerHTML = `<div class="section-label">待回补（倒T·先卖后买）· ${covers.length} 笔${asOf ? ' · 账单截至 ' + esc(asOf) : ''}</div>
+      <div class="hint" style="margin-bottom:8px">每只标的一张卡；改「最新价」后倒T预估会全页更新。</div>` +
+      codes.map((code, idx) => {
+        const list = byCode.get(code);
         const ref = refPriceForCode(code);
-        const refTxt = ref.price > 0
-          ? `参考价 ${fmt(ref.price, 3)}（${refPriceSourceLabel(ref.source)}）`
-          : '暂无参考价';
+        const secType = coverSecType(code, list);
+        const typeCls = 'group-' + (secType || 'stock');
+        const altCls = 'group-i' + (idx % 2);
         const baseTip = (codeHasBaseLots(code) || codeHasRemainingLongs(code))
           ? `<div class="cover-base-tip">窗口内无多头可配；你可能还有底仓/剩余多头，见整体持仓</div>`
           : `<div class="cover-base-tip">窗口内无多头可配（先卖腿）</div>`;
-        return `<div class="cover-group">
-          <div class="cover-group-title">${esc(displayName(code))} <span class="g-code">${esc(code)}</span>
-            <span class="cover-ref">${refTxt}</span>
+        return `<div class="group cover-card ${altCls} ${typeCls}" data-code="${esc(code)}">
+          <div class="group-head cover-card-head">
+            <div class="group-head-top">
+              <span class="g-name">${esc(displayName(code))}</span>
+              <span class="g-code">${esc(code)}</span>
+              <span class="badge">${SEC_TYPE_LABEL[secType] || '股票'}</span>
+              <div class="g-meta">${list.length}笔待回补</div>
+            </div>
+            <div class="group-quote cover-quote-bar">
+              ${refQuoteInputHtml(code)}
+            </div>
+            ${baseTip}
           </div>
-          ${baseTip}
+          <div class="cover-card-body">
           ${list.map((c) => {
             const est = ref.price > 0 ? estimateCoverAtRef(c, ref.price) : null;
             let advice = '';
             let adviceCls = 'cover-advice';
             if (!est) {
-              advice = '暂无参考价，可在下方标的手填现价后再看倒T预估';
+              advice = '请在上方填写最新价，查看倒T预估';
               adviceCls += ' cover-advice-muted';
             } else if (ref.price < c.price) {
-              advice = `可考虑回补 · 按参考价回补预估倒T净利 ${fmtSign(est.net)}（毛利 ${fmtSign(est.gross)}，已扣费估算）`;
+              advice = `可考虑回补 · 按最新价回补预估倒T净利 ${fmtSign(est.net)}（毛利 ${fmtSign(est.gross)}，已扣费估算）`;
               adviceCls += ' cover-advice-ok';
             } else {
-              advice = `不宜回补 · 按参考价回补预估倒T净利 ${fmtSign(est.net)}`;
+              advice = `不宜回补 · 按最新价回补预估倒T净利 ${fmtSign(est.net)}`;
               adviceCls += ' cover-advice-bad';
             }
             return `<div class="cover-row decision-row">
@@ -435,8 +509,10 @@ function renderCoverAndWatch() {
               <div class="${adviceCls}">${advice}</div>
             </div>`;
           }).join('')}
+          </div>
         </div>`;
       }).join('');
+    bindRefQuoteInputs(coverBox);
   }
 
   const watches = Store.settings.watchPrices || [];
@@ -445,35 +521,59 @@ function renderCoverAndWatch() {
     watchBox.innerHTML = '';
   } else {
     watchBox.hidden = false;
+    const byCode = new Map();
+    watches.forEach((w) => {
+      if (!byCode.has(w.code)) byCode.set(w.code, []);
+      byCode.get(w.code).push(w);
+    });
+    const wCodes = Array.from(byCode.keys()).sort();
     watchBox.innerHTML = `<div class="section-label">扳本关注价 · ${watches.length}</div>` +
-      watches.map((w) => {
-        const sell = Store.trades.find((t) => t.id === w.fromSellId);
-        const r = (sell && (fullMatchResult.sells.get(sell.id) || matchResult.sells.get(sell.id))) || null;
-        const net = r && r.matchedQty > 0 ? r.netPnl : (w.netPnl != null ? w.netPnl : null);
-        const beHtml = sell && net < 0 ? breakevenHelpHtml(sell, net) : '';
-        const ref = refPriceForCode(w.code);
-        const tip = ref.price > 0
-          ? (ref.price < w.price
-            ? `<span class="cover-advice-ok">参考 ${fmt(ref.price, 3)} 低于关注卖价</span>`
-            : `<span class="cover-advice-bad">参考 ${fmt(ref.price, 3)} 已不低于关注卖价</span>`)
-          : '';
-        return `<div class="watch-row" data-id="${esc(w.id)}">
-          <span class="g-name">${esc(displayName(w.code))}</span>
-          <span class="g-code">${esc(w.code)}</span>
-          <span class="lot-price">${fmt(w.price, 3)}</span>
-          <span class="lot-date">${esc(w.date || '')}</span>
-          ${tip}
-          <button type="button" class="btn btn-mini" data-act="del-watch" data-id="${esc(w.id)}">移除</button>
-          ${beHtml}
+      wCodes.map((code, idx) => {
+        const list = byCode.get(code);
+        const secType = coverSecType(code, null);
+        const typeCls = 'group-' + (secType || 'stock');
+        const altCls = 'group-i' + (idx % 2);
+        return `<div class="group cover-card watch-card ${altCls} ${typeCls}" data-code="${esc(code)}">
+          <div class="group-head cover-card-head">
+            <div class="group-head-top">
+              <span class="g-name">${esc(displayName(code))}</span>
+              <span class="g-code">${esc(code)}</span>
+              <span class="badge">${SEC_TYPE_LABEL[secType] || '股票'}</span>
+            </div>
+            <div class="group-quote cover-quote-bar">${refQuoteInputHtml(code)}</div>
+          </div>
+          <div class="cover-card-body">
+          ${list.map((w) => {
+            const sell = Store.trades.find((t) => t.id === w.fromSellId);
+            const r = (sell && (fullMatchResult.sells.get(sell.id) || matchResult.sells.get(sell.id))) || null;
+            const net = r && r.matchedQty > 0 ? r.netPnl : (w.netPnl != null ? w.netPnl : null);
+            const beHtml = sell && net < 0 ? breakevenHelpHtml(sell, net) : '';
+            const ref = refPriceForCode(w.code);
+            const tip = ref.price > 0
+              ? (ref.price < w.price
+                ? `<span class="cover-advice-ok">最新价 ${fmt(ref.price, 3)} 低于关注卖价</span>`
+                : `<span class="cover-advice-bad">最新价 ${fmt(ref.price, 3)} 已不低于关注卖价</span>`)
+              : '';
+            return `<div class="watch-row" data-id="${esc(w.id)}">
+              <span class="tag tag-loss">关注卖价</span>
+              <span class="lot-price">${fmt(w.price, 3)}</span>
+              <span class="lot-date">${esc(w.date || '')}</span>
+              ${tip}
+              <button type="button" class="btn btn-mini" data-act="del-watch" data-id="${esc(w.id)}">移除</button>
+              ${beHtml}
+            </div>`;
+          }).join('')}
+          </div>
         </div>`;
       }).join('');
     $$('#watchList [data-act="del-watch"]').forEach((b) => {
       b.addEventListener('click', () => {
         Store.settings.watchPrices = (Store.settings.watchPrices || []).filter((x) => x.id !== b.dataset.id);
         Store.save();
-        renderCoverAndWatch();
+        renderAll();
       });
     });
+    bindRefQuoteInputs(watchBox);
   }
 }
 
@@ -617,9 +717,9 @@ function renderLedger() {
           <div class="gs"><div class="v ${pnlClass(st.realized)}">${fmtSign(st.realized)}</div><div class="k">做T净利</div></div>
         </div>
         <div class="group-quote">
-          <label>现价</label>
-          <input class="quote-input" type="number" step="0.001" min="0" data-code="${esc(code)}" value="${st.quote || ''}" placeholder="手填现价">
-          <span class="hint-inline">成功${st.win}笔 · 亏损${st.loss}笔</span>
+          <label>最新价</label>
+          <input class="quote-input ref-quote-input" type="number" step="0.001" min="0" data-code="${esc(code)}" value="${st.quote || ''}" placeholder="输入实时价">
+          <span class="hint-inline">成功${st.win}笔 · 亏损${st.loss}笔 · 改价全页联动</span>
         </div>
       </div>
       <div class="group-body">
@@ -643,24 +743,8 @@ function renderLedger() {
   });
   $$('#ledgerList .quote-input').forEach((inp) => {
     inp.addEventListener('click', (e) => e.stopPropagation());
-    inp.addEventListener('input', () => {
-      const code = inp.dataset.code;
-      const v = parseFloat(inp.value) || 0;
-      Store.settings.quotes[code] = v;
-      Store.save();
-      const st = codeStats(code, matchForCode(code));
-      const el = $(`.float-v[data-code="${code}"]`);
-      if (!el) return;
-      if (st.floatPnl == null) {
-        el.textContent = '--';
-        el.className = 'v float-v';
-      } else {
-        el.textContent = fmtSign(st.floatPnl);
-        el.className = 'v float-v ' + pnlClass(st.floatPnl);
-      }
-      renderCoverAndWatch();
-    });
   });
+  bindRefQuoteInputs($('#ledgerList'));
   $$('#ledgerList [data-act="cycle-type"]').forEach((b) => {
     b.addEventListener('click', (e) => { e.stopPropagation(); cycleSecType(b.dataset.code); });
   });
@@ -828,6 +912,7 @@ function renderSells() {
   $$('#sellList [data-act="pin-watch"]').forEach((b) => {
     b.addEventListener('click', () => pinWatchFromSell(b.dataset.id));
   });
+  bindRefQuoteInputs($('#sellList'));
 }
 
 function pinWatchFromSell(sellId) {
