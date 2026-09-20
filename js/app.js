@@ -275,10 +275,112 @@ function refPriceSourceLabel(source) {
   return '';
 }
 
+/** 全历史下该代码是否还有剩余多头（含底仓） */
+function codeHasRemainingLongs(code) {
+  for (const t of Store.trades) {
+    if (t.code !== code || t.side !== 'buy') continue;
+    const lot = fullMatchResult.lots.get(t.id);
+    if (lot && lot.remainingQty > 0) return true;
+  }
+  return false;
+}
+
+/** 当前窗口核销里是否有底仓买单 */
+function codeHasBaseLots(code) {
+  for (const t of Store.trades) {
+    if (t.code !== code || t.side !== 'buy') continue;
+    const lot = matchResult.lots.get(t.id);
+    if (lot && lot.isBase) return true;
+  }
+  return false;
+}
+
+/** 按参考价回补一笔待回补的倒T预估净利 */
+function estimateCoverAtRef(cover, refPrice) {
+  if (!(refPrice > 0) || !(cover.qty > 0)) return null;
+  const secType = cover.secType || guessSecType(cover.code);
+  const rules = Store.settings.feeRules;
+  const buyFee = totalFees(calcFees(secType, 'buy', refPrice * cover.qty, rules));
+  const sell = Store.trades.find((t) => t.id === cover.sellId);
+  const sellFeeShare = sell
+    ? totalFees(sell.fees) * (cover.qty / sell.qty)
+    : totalFees(calcFees(secType, 'sell', cover.price * cover.qty, rules));
+  const gross = (cover.price - refPrice) * cover.qty;
+  return {
+    gross: round2(gross),
+    net: round2(gross - buyFee - sellFeeShare),
+    buyFee: round2(buyFee),
+    sellFeeShare: round2(sellFeeShare),
+  };
+}
+
+/**
+ * 卖亏后再买：估算扳本卖出价。
+ * 使 (卖价−再买价)×数量 − 买费 − 卖费 ≈ |已实现亏损|
+ */
+function estimateBreakevenSellPrice(absLoss, qty, buyPrice, secType) {
+  if (!(qty > 0) || !(buyPrice > 0) || !(absLoss > 0)) return null;
+  const rules = Store.settings.feeRules;
+  const type = secType || 'stock';
+  let sellPrice = buyPrice + absLoss / qty;
+  for (let i = 0; i < 6; i++) {
+    const buyFee = totalFees(calcFees(type, 'buy', buyPrice * qty, rules));
+    const sellFee = totalFees(calcFees(type, 'sell', sellPrice * qty, rules));
+    sellPrice = buyPrice + (absLoss + buyFee + sellFee) / qty;
+  }
+  return Math.round(sellPrice * 1000) / 1000;
+}
+
+function breakevenHelpHtml(sellTrade, realizedNetPnl) {
+  if (!sellTrade || !(realizedNetPnl < 0)) return '';
+  const absLoss = Math.abs(realizedNetPnl);
+  const qty = sellTrade.qty;
+  const ref = refPriceForCode(sellTrade.code);
+  const secType = sellTrade.secType || guessSecType(sellTrade.code);
+  const r = matchResult.sells.get(sellTrade.id) || fullMatchResult.sells.get(sellTrade.id);
+  const pairHint = r && r.pairs && r.pairs.length
+    ? `配对买价 ${r.pairs.map((p) => fmt(p.buyPrice, 3)).join('/')}`
+    : '';
+  if (!(ref.price > 0)) {
+    return `<div class="decision-card">
+      <div class="decision-title">扳本参考（估算）</div>
+      <div>已实现亏损 <span class="c-down">${fmtSign(-absLoss)}</span>${pairHint ? ' · ' + pairHint : ''}</div>
+      <div class="hint">填/有参考价后，可估算「再买后要卖到多少才回本」</div>
+    </div>`;
+  }
+  const be = estimateBreakevenSellPrice(absLoss, qty, ref.price, secType);
+  if (be == null) return '';
+  return `<div class="decision-card">
+    <div class="decision-title">扳本参考（估算）</div>
+    <div>已实现亏损 <span class="c-down">${fmtSign(-absLoss)}</span>${pairHint ? ' · ' + pairHint : ''}</div>
+    <div>若按参考价 <b>${fmt(ref.price, 3)}</b> 再买 ${fmt(qty, 0)} 股，
+      卖到约 <b class="c-up">${fmt(be, 3)}</b> 以上可弥补上次亏损</div>
+    <div class="hint">费用按当前费率估算；不是实时行情</div>
+  </div>`;
+}
+
 function renderCoverAndWatch() {
   const coverBox = $('#coverList');
   const watchBox = $('#watchList');
+  const helpBox = $('#matchHelpBox');
   if (!coverBox || !watchBox) return;
+
+  if (helpBox) {
+    if (currentMatchMode() === 'time') {
+      helpBox.hidden = false;
+      helpBox.innerHTML = `<details class="match-help">
+        <summary>待回补 / 扳本怎么区分？</summary>
+        <ul>
+          <li><b>待回补</b>：先卖、当时没有可配多头，等买回（倒T）。看回补上限与预估倒T净利。</li>
+          <li><b>卖亏扳本</b>：已经配对亏损的卖出。看「卖出」页或下方关注价里的已亏金额与扳本卖出价。</li>
+          <li>两者不是同一张账，不要混用。</li>
+        </ul>
+      </details>`;
+    } else {
+      helpBox.hidden = true;
+      helpBox.innerHTML = '';
+    }
+  }
 
   const asOf = (Store.account && Store.account.asOf) || '';
   const covers = currentMatchMode() === 'time' ? pendingCoversForView() : [];
@@ -287,8 +389,8 @@ function renderCoverAndWatch() {
     coverBox.innerHTML = '';
   } else if (!covers.length) {
     coverBox.hidden = false;
-    coverBox.innerHTML = `<div class="section-label">待回补（先卖后买）</div>
-      <div class="hint">当前没有待回补。整体持仓下也会统计全历史先卖未买回的数量；有的话会出现在这里。</div>`;
+    coverBox.innerHTML = `<div class="section-label">待回补（倒T·先卖后买）</div>
+      <div class="hint">当前没有待回补。整体持仓下也会统计全历史先卖未买回；有的话会出现在这里。</div>`;
   } else {
     coverBox.hidden = false;
     const byCode = new Map();
@@ -296,37 +398,40 @@ function renderCoverAndWatch() {
       if (!byCode.has(c.code)) byCode.set(c.code, []);
       byCode.get(c.code).push(c);
     }
-    coverBox.innerHTML = `<div class="section-label">待回补（先卖后买）· ${covers.length} 笔${asOf ? ` · 参考价截至 ${esc(asOf)}` : ''}</div>` +
+    coverBox.innerHTML = `<div class="section-label">待回补（倒T·先卖后买）· ${covers.length} 笔${asOf ? ` · 参考价截至 ${esc(asOf)}` : ''}</div>` +
       Array.from(byCode.entries()).sort((a, b) => a[0].localeCompare(b[0])).map(([code, list]) => {
         const ref = refPriceForCode(code);
         const refTxt = ref.price > 0
           ? `参考价 ${fmt(ref.price, 3)}（${refPriceSourceLabel(ref.source)}）`
           : '暂无参考价';
+        const baseTip = (codeHasBaseLots(code) || codeHasRemainingLongs(code))
+          ? `<div class="cover-base-tip">窗口内无多头可配；你可能还有底仓/剩余多头，见整体持仓</div>`
+          : `<div class="cover-base-tip">窗口内无多头可配（先卖腿）</div>`;
         return `<div class="cover-group">
           <div class="cover-group-title">${esc(displayName(code))} <span class="g-code">${esc(code)}</span>
             <span class="cover-ref">${refTxt}</span>
           </div>
+          ${baseTip}
           ${list.map((c) => {
+            const est = ref.price > 0 ? estimateCoverAtRef(c, ref.price) : null;
             let advice = '';
             let adviceCls = 'cover-advice';
-            if (!(ref.price > 0)) {
-              advice = '暂无账单价，可在下方标的里手填现价';
+            if (!est) {
+              advice = '暂无参考价，可在下方标的手填现价后再看倒T预估';
               adviceCls += ' cover-advice-muted';
+            } else if (ref.price < c.price) {
+              advice = `可考虑回补 · 按参考价回补预估倒T净利 ${fmtSign(est.net)}（毛利 ${fmtSign(est.gross)}，已扣费估算）`;
+              adviceCls += ' cover-advice-ok';
             } else {
-              const diff = round2(c.price - ref.price);
-              if (ref.price < c.price) {
-                advice = `可考虑回补 · 参考价低于待回补 ${fmt(diff, 3)}`;
-                adviceCls += ' cover-advice-ok';
-              } else {
-                advice = `不宜回补 · 参考价已不低于待回补（差 ${fmt(Math.abs(diff), 3)}）`;
-                adviceCls += ' cover-advice-bad';
-              }
+              advice = `不宜回补 · 按参考价回补预估倒T净利 ${fmtSign(est.net)}`;
+              adviceCls += ' cover-advice-bad';
             }
-            return `<div class="cover-row">
+            return `<div class="cover-row decision-row">
               <span class="tag tag-warn">待回补</span>
-              <span class="lot-price">${fmt(c.price, 3)}</span>
+              <span class="lot-price">回补上限 ${fmt(c.price, 3)}</span>
               <span class="lot-qty">${fmt(c.qty, 0)}股</span>
               <span class="lot-date">${esc(c.date)} ${esc(c.time || '')}</span>
+              <div class="hint-inline">买回须低于上限才倒T盈利（费用另计）</div>
               <div class="${adviceCls}">${advice}</div>
             </div>`;
           }).join('')}
@@ -342,11 +447,15 @@ function renderCoverAndWatch() {
     watchBox.hidden = false;
     watchBox.innerHTML = `<div class="section-label">扳本关注价 · ${watches.length}</div>` +
       watches.map((w) => {
+        const sell = Store.trades.find((t) => t.id === w.fromSellId);
+        const r = (sell && (fullMatchResult.sells.get(sell.id) || matchResult.sells.get(sell.id))) || null;
+        const net = r && r.matchedQty > 0 ? r.netPnl : (w.netPnl != null ? w.netPnl : null);
+        const beHtml = sell && net < 0 ? breakevenHelpHtml(sell, net) : '';
         const ref = refPriceForCode(w.code);
         const tip = ref.price > 0
           ? (ref.price < w.price
-            ? `<span class="cover-advice-ok">参考 ${fmt(ref.price, 3)} 低于关注价</span>`
-            : `<span class="cover-advice-bad">参考 ${fmt(ref.price, 3)} 已不低于关注价</span>`)
+            ? `<span class="cover-advice-ok">参考 ${fmt(ref.price, 3)} 低于关注卖价</span>`
+            : `<span class="cover-advice-bad">参考 ${fmt(ref.price, 3)} 已不低于关注卖价</span>`)
           : '';
         return `<div class="watch-row" data-id="${esc(w.id)}">
           <span class="g-name">${esc(displayName(w.code))}</span>
@@ -355,6 +464,7 @@ function renderCoverAndWatch() {
           <span class="lot-date">${esc(w.date || '')}</span>
           ${tip}
           <button type="button" class="btn btn-mini" data-act="del-watch" data-id="${esc(w.id)}">移除</button>
+          ${beHtml}
         </div>`;
       }).join('');
     $$('#watchList [data-act="del-watch"]').forEach((b) => {
@@ -727,12 +837,14 @@ function pinWatchFromSell(sellId) {
   if (list.some((w) => w.fromSellId === sellId)) {
     Store.settings.watchPrices = list.filter((w) => w.fromSellId !== sellId);
   } else {
+    const r = matchResult.sells.get(s.id) || fullMatchResult.sells.get(s.id);
     list.push({
       id: 'w' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
       code: s.code,
       price: s.price,
       date: s.date,
       fromSellId: s.id,
+      netPnl: r && r.matchedQty > 0 ? r.netPnl : null,
     });
     Store.settings.watchPrices = list;
   }
@@ -765,6 +877,9 @@ function renderSellCard(s) {
   const pinBtn = (!r.success && r.matchedQty > 0) || (r.matchedQty === 0)
     ? `<button type="button" class="btn btn-mini btn-hide" data-act="pin-watch" data-id="${s.id}">${watched ? '已钉关注价' : '钉扳本关注价'}</button>`
     : '';
+  const beHtml = r.matchedQty > 0 && r.netPnl < 0 && !r.isReverse
+    ? breakevenHelpHtml(s, r.netPnl)
+    : '';
 
   return `<div class="sell-card">
     <div class="sell-head">
@@ -782,6 +897,7 @@ function renderSellCard(s) {
         <span class="p-pnl ${pnlClass((s.price - p.buyPrice) * p.qty)}">${fmtSign(round2((s.price - p.buyPrice) * p.qty))}</span>
       </div>`).join('')}</div>` : ''}
     <div class="sell-fees">卖出费用 ${feeText(s.fees)}，买入费用分摊 ${fmt(r.buyFeeShare)}</div>
+    ${beHtml}
     <div class="lot-actions">
       ${pinBtn}
       <button class="btn btn-mini" data-act="del-trade" data-id="${s.id}">删除此笔</button>
