@@ -1,7 +1,7 @@
-/* Service Worker：缓存应用外壳，实现离线可用。改动代码后需要更�?CACHE_VERSION�?*/
+/* Service Worker：缓存应用外壳，实现离线坯用。改动代砝坎需覝更�?CACHE_VERSION�?*/
 'use strict';
 
-const CACHE_VERSION = 't0ledger-v33';
+const CACHE_VERSION = 't0ledger-v34';
 const APP_SHELL = [
   './',
   './index.html',
@@ -32,7 +32,7 @@ self.addEventListener('activate', (e) => {
   );
 });
 
-/* 网络优先、失败回退缓存：保证有网时总能拿到最新版本，无网时离线可�?*/
+/* 网络优先〝失败回退缓存：保话有网时总能拿到最新版本，无网时离线坯�?*/
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
   e.respondWith(

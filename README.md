@@ -13,6 +13,7 @@ A 股散户做 T+0 的「买入成本台账」手机应用（PWA）。
 ```bash
 cd "D:\我的cursor项目文件\t0-ledger"
 node tools/merge-xlsx.js "对账单.xlsx的完整路径"
+node tools/export-todo-xlsx.js
 # 然后把 sw.js 中 CACHE_VERSION +1，git add/commit/push origin main
 ```
 

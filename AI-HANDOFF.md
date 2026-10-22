@@ -38,6 +38,7 @@ t0-ledger/
 ├── manifest.json / sw.js   # PWA；改代码后必须 bump CACHE_VERSION
 ├── tools/
 │   ├── merge-xlsx.js       # ★ 日常：增量合并对账单（最常用）
+│   ├── export-todo-xlsx.js # ★ 日常：同步导出电脑勾选台账 Excel
 │   ├── import-user-xlsx.js # 全量重建 seed（慎用，会覆盖）
 │   ├── test-match.js       # 核销算法自测
 │   ├── serve.js            # 本地预览：node tools/serve.js 8765
@@ -130,16 +131,27 @@ cd "D:\我的cursor项目文件\t0-ledger"
 
 # 2）增量合并（自动去重、更新账户快照、seedRevision+1）
 #    ⚠ 同一份 xlsx 不要重复跑第二次：成交会去重，但银证转入/转出/股息会再累加一次！
+#    多份账单按时间从早到晚依次 merge。
 node tools/merge-xlsx.js "对账单xlsx的完整路径"
 
-# 3）把 sw.js 里 CACHE_VERSION 数字 +1
+# 3）同步导出电脑勾选台账（覆盖到做T数据记录目录）
+#    用户明确要求：以后每次更新 App 数据，必须同时更新这张 Excel。
+node tools/export-todo-xlsx.js
+
+# 4）把 sw.js 里 CACHE_VERSION 数字 +1
 #    例如 t0ledger-v11 → t0ledger-v12
 
-# 4）提交并推送到 GitHub
+# 5）提交并推送到 GitHub（只提交仓库内文件；电脑台账 Excel 在用户本地文件夹，不入库）
 git add data/seed.json sw.js
 git commit -m "增量合并 YYYY/MM/DD 对账单数据"
 git push origin main
 ```
+
+电脑勾选台账输出路径：
+
+`d:\小龙虾的文件夹\做T数据记录\做T待办台账_截至YYYYMMDD.xlsx`
+
+按账单 `asOf` 命名。新导出后旧日期文件可留着当存档；回复用户时写明新文件完整路径。该表给用户在电脑 Excel 打钩（已处理/怎么处理了），**不回写 App**。
 
 ### 账户总盈亏为何可能和券商 APP 差一截
 
@@ -281,7 +293,7 @@ git push origin main
 
 | 用户说 | AI 做 |
 |--------|--------|
-| 「把这份对账单更新到做T里」+ xlsx 路径 | 跑 `merge-xlsx.js` → bump `CACHE_VERSION` → commit push → 汇报新增笔数 |
+| 「把这份对账单更新到做T里」+ xlsx 路径 | 跑 `merge-xlsx.js`（多份按时间从早到晚）→ `export-todo-xlsx.js` 更新电脑勾选 Excel → bump `CACHE_VERSION` → commit push → 汇报新增笔数 + Excel 路径 |
 | 「改隐藏/界面/核销逻辑」 | 改对应 js/css → 自测 → bump cache → push |
 | 「链接要不要每天换？」 | 答：不用，固定 https://shijiuyumile.github.io/t0-ledger/ |
 | 「数据会自动更新吗？」 | 答：你合并推送后，用户打开 APP 会自动增量同步 |
@@ -306,6 +318,6 @@ git push origin main
 ```
 请打开项目 t0-ledger，严格按 AI-HANDOFF.md 操作。
 我要增量更新对账单数据，文件在：<粘贴 xlsx 完整路径>
-请执行 merge-xlsx → 提高 sw.js 的 CACHE_VERSION → commit 并 push 到 origin main，
-最后用中文告诉我新增了多少笔、总成交多少、账户截至日期，以及我手机如何刷新。
+请执行 merge-xlsx → export-todo-xlsx（更新电脑勾选台账）→ 提高 sw.js 的 CACHE_VERSION → commit 并 push 到 origin main，
+最后用中文告诉我新增了多少笔、总成交多少、账户截至日期、电脑 Excel 路径，以及我手机如何刷新。
 ```
