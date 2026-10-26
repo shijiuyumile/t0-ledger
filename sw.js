@@ -1,7 +1,7 @@
 /* Service Worker：缓存应用外壳，实现离线坯用。改动代砝坎需覝更�?CACHE_VERSION�?*/
 'use strict';
 
-const CACHE_VERSION = 't0ledger-v34';
+const CACHE_VERSION = 't0ledger-v35';
 const APP_SHELL = [
   './',
   './index.html',
