@@ -37,6 +37,11 @@
           <button type="button" data-panel="lots">待做T <span class="panel-count" id="panelCountLots"></span></button>
           <button type="button" data-panel="covers">待回补 <span class="panel-count" id="panelCountCovers"></span></button>
           <button type="button" data-panel="breakeven">待扳本 <span class="panel-count" id="panelCountBreakeven"></span></button>
+          <button type="button" data-panel="stairs">老太太扶楼梯 <span class="panel-count" id="panelCountStairs"></span></button>
+        </div>
+        <div class="toolbar toolbar-wrap" id="codeOrderBar">
+          <button type="button" class="btn btn-mini" id="btnSortByMv">按持仓金额排</button>
+          <span class="hint" style="margin:0">卡片上可置顶 / 上移 / 下移，顺序会记住</span>
         </div>
         <p class="hint mode-hint" id="ledgerMatchHint"></p>
         <div id="matchHelpBox" class="match-help-box" hidden></div>
@@ -71,13 +76,30 @@
           <input type="checkbox" id="showHiddenLots">
           <span>显示已隐藏</span>
         </label>
-        <div class="seg" id="lotSortSeg">
+        <div class="seg seg-wrap" id="lotSortSeg">
           <button data-sort="asc">价格从低到高</button>
           <button data-sort="desc">价格从高到低</button>
+          <button data-sort="dateDesc">日期从新到旧</button>
+          <button data-sort="dateAsc">日期从旧到新</button>
         </div>
+      </div>
+      <div id="stairsControls" class="t-window-controls" hidden>
+        <div class="seg seg-wrap" id="stairsDaysSeg">
+          <button type="button" data-days="1">近1天</button>
+          <button type="button" data-days="2">近2天</button>
+          <button type="button" data-days="7">近7天</button>
+          <button type="button" data-days="custom">自定天数</button>
+        </div>
+        <label class="date-row" id="stairsDaysRow">
+          <span>近</span>
+          <input type="number" id="stairsDaysInput" min="1" max="3650" step="1">
+          <span>天（含今天）</span>
+        </label>
+        <p class="hint mode-hint" id="stairsHint"></p>
       </div>
       <div id="coverList" class="cover-list" hidden></div>
       <div id="breakevenList" class="watch-list" hidden></div>
+      <div id="stairsList" class="cover-list" hidden></div>
       <div id="ledgerList"></div>
     </section>
 
@@ -90,6 +112,7 @@
           <button data-filter="win">做T成功</button>
           <button data-filter="all">全部</button>
         </div>
+        <button type="button" class="btn btn-mini" id="btnSortByMvSells">按持仓金额排</button>
       </div>
       <div id="sellList"></div>
     </section>

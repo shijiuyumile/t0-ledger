@@ -176,12 +176,22 @@ body {
   margin-bottom: 14px;
 }
 .cover-card-head {
-  cursor: default;
+  cursor: pointer;
 }
 .cover-card-body {
+  display: none;
   background: #fff;
   border-top: 0.5px solid var(--line);
 }
+.group.open .cover-card-body {
+  display: block;
+}
+.code-order-btns {
+  display: flex; flex-wrap: wrap; gap: 4px;
+  margin-top: 8px;
+}
+.code-order-btns .btn { font-size: 11px; padding: 3px 8px; }
+#codeOrderBar { margin-top: 6px; align-items: center; }
 .cover-quote-bar {
   margin-top: 8px;
 }

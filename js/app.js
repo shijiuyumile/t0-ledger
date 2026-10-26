@@ -8,6 +8,7 @@ Store.load();
 let fullMatchResult = { lots: new Map(), sells: new Map() };
 let matchResult = { lots: new Map(), sells: new Map() };
 let timeMatchResult = { lots: new Map(), sells: new Map(), pendingCovers: [] };
+let stairsMatchResult = { lots: new Map(), sells: new Map(), pendingCovers: [] };
 
 function todayISO() {
   const d = new Date();
@@ -64,8 +65,18 @@ function currentMatchMode() {
 
 function currentLedgerPanel() {
   const p = Store.settings.ledgerPanel;
-  if (p === 'covers' || p === 'breakeven') return p;
+  if (p === 'covers' || p === 'breakeven' || p === 'stairs') return p;
   return 'lots';
+}
+
+function stairsDayCount() {
+  const p = String(Store.settings.stairsDaysPreset || '7');
+  if (p === '1' || p === '2' || p === '7') return Number(p);
+  return Math.max(1, Math.floor(Number(Store.settings.stairsDays) || 7));
+}
+
+function resolveStairsFromDate() {
+  return addDaysISO(todayISO(), -(stairsDayCount() - 1));
 }
 
 function matchOpts(extra) {
@@ -84,6 +95,9 @@ function recompute() {
   timeMatchResult = computeMatches(Store.trades, {
     mode: 'time',
     fromDate: fromDate || undefined,
+  });
+  stairsMatchResult = computeStairsMatches(Store.trades, {
+    fromDate: resolveStairsFromDate(),
   });
 }
 
@@ -132,6 +146,10 @@ async function ensureSeed() {
       if (!Store.data.settings.matchMode) Store.data.settings.matchMode = 'closest';
       if (!Store.data.settings.ledgerPanel) Store.data.settings.ledgerPanel = 'lots';
       if (!Array.isArray(Store.data.settings.watchPrices)) Store.data.settings.watchPrices = [];
+      if (!Store.data.settings.stairsDaysPreset) Store.data.settings.stairsDaysPreset = '7';
+      if (!(Number(Store.data.settings.stairsDays) > 0)) Store.data.settings.stairsDays = 7;
+      if (!Array.isArray(Store.data.settings.codeOrder)) Store.data.settings.codeOrder = [];
+      if (!Store.data.settings.codeOrderMode) Store.data.settings.codeOrderMode = 'custom';
       Store.data.seedRevision = seed.seedRevision || 1;
       Store.save();
       console.log('已载入历史对账单', Store.trades.length, '笔');
@@ -206,7 +224,92 @@ function displayName(code) {
 }
 
 /** 会话内记住展开状态（刷新页面后默认折叠） */
-const uiOpen = { ledger: new Set(), sells: new Set() };
+const uiOpen = { ledger: new Set(), sells: new Set(), covers: new Set(), breakeven: new Set(), stairs: new Set() };
+
+function marketValueOf(code) {
+  const h = ((Store.account && Store.account.holdings) || []).find((x) => x.code === code);
+  if (!h) return 0;
+  if (Number(h.marketValue) > 0) return Number(h.marketValue);
+  if (h.qty > 0 && h.lastPrice > 0) return h.qty * h.lastPrice;
+  return 0;
+}
+
+function sortCodes(codes) {
+  const list = Array.from(codes);
+  if (Store.settings.codeOrderMode === 'marketValue') {
+    return list.sort((a, b) => marketValueOf(b) - marketValueOf(a) || String(a).localeCompare(String(b)));
+  }
+  const order = Store.settings.codeOrder || [];
+  const idx = (c) => {
+    const i = order.indexOf(c);
+    return i < 0 ? 100000 : i;
+  };
+  return list.sort((a, b) => idx(a) - idx(b) || String(a).localeCompare(String(b)));
+}
+
+function codeOrderBtnsHtml() {
+  return `<div class="code-order-btns">
+    <button type="button" class="btn btn-mini" data-act="code-top">置顶</button>
+    <button type="button" class="btn btn-mini" data-act="code-up">上移</button>
+    <button type="button" class="btn btn-mini" data-act="code-down">下移</button>
+  </div>`;
+}
+
+function applyCodeMove(code, act, presentCodes) {
+  const present = Array.from(presentCodes);
+  if (act === 'mv') {
+    Store.settings.codeOrderMode = 'marketValue';
+    const ranked = present.slice().sort((a, b) => marketValueOf(b) - marketValueOf(a) || String(a).localeCompare(String(b)));
+    const rest = (Store.settings.codeOrder || []).filter((c) => ranked.indexOf(c) < 0);
+    Store.settings.codeOrder = ranked.concat(rest);
+    Store.save();
+    renderAll();
+    return;
+  }
+  Store.settings.codeOrderMode = 'custom';
+  const visual = sortCodes(present);
+  const i = visual.indexOf(code);
+  if (i < 0) return;
+  if (act === 'top' && i > 0) {
+    visual.splice(i, 1);
+    visual.unshift(code);
+  } else if (act === 'up' && i > 0) {
+    const tmp = visual[i - 1]; visual[i - 1] = visual[i]; visual[i] = tmp;
+  } else if (act === 'down' && i < visual.length - 1) {
+    const tmp = visual[i + 1]; visual[i + 1] = visual[i]; visual[i] = tmp;
+  } else {
+    return;
+  }
+  const rest = (Store.settings.codeOrder || []).filter((c) => visual.indexOf(c) < 0);
+  Store.settings.codeOrder = visual.concat(rest);
+  Store.save();
+  renderAll();
+}
+
+function bindCodeOrderButtons(rootSel, presentCodes) {
+  $$(rootSel + ' [data-act^="code-"]').forEach((b) => {
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const group = b.closest('.group');
+      const code = group && group.dataset.code;
+      if (!code) return;
+      const act = b.dataset.act === 'code-top' ? 'top' : (b.dataset.act === 'code-up' ? 'up' : 'down');
+      applyCodeMove(code, act, presentCodes);
+    });
+  });
+}
+
+function sortLotRows(arr) {
+  const s = Store.settings.lotSort || 'asc';
+  if (s === 'dateDesc' || s === 'dateAsc') {
+    const dir = s === 'dateDesc' ? -1 : 1;
+    arr.sort((a, b) => dir * tradeTimeKey(a.trade).localeCompare(tradeTimeKey(b.trade)));
+    return arr;
+  }
+  const dir = s === 'desc' ? -1 : 1;
+  arr.sort((a, b) => (a.trade.price - b.trade.price) * dir);
+  return arr;
+}
 
 /** 某标的：持仓、成本、浮动、做T盈利/亏损合计 */
 function codeStats(code, mr) {
@@ -474,13 +577,20 @@ function syncLedgerPanelUI() {
   if (bEl) bEl.textContent = beN ? String(beN) : '';
 
   const toolbar = $('#ledgerToolbarLots');
+  const stairsControls = $('#stairsControls');
   const coverBox = $('#coverList');
   const beBox = $('#breakevenList');
+  const stairsBox = $('#stairsList');
   const lotBox = $('#ledgerList');
-  if (toolbar) toolbar.hidden = panel !== 'lots';
+  if (toolbar) toolbar.hidden = panel !== 'lots' && panel !== 'stairs';
+  const sortSeg = $('#lotSortSeg');
+  if (sortSeg) sortSeg.hidden = panel !== 'lots';
+  if (stairsControls) stairsControls.hidden = panel !== 'stairs';
   if (coverBox) coverBox.hidden = panel !== 'covers';
   if (beBox) beBox.hidden = panel !== 'breakeven';
+  if (stairsBox) stairsBox.hidden = panel !== 'stairs';
   if (lotBox) lotBox.hidden = panel !== 'lots';
+  syncStairsDaysUI();
 }
 
 function renderCoverPanel() {
@@ -504,33 +614,36 @@ function renderCoverPanel() {
     if (!byCode.has(c.code)) byCode.set(c.code, []);
     byCode.get(c.code).push(c);
   }
-  const codes = Array.from(byCode.keys()).sort();
+  const codes = sortCodes(byCode.keys());
   coverBox.innerHTML = `<div class="section-label">待回补（倒T·先卖后买）· ${covers.length} 笔${asOf ? ' · 账单截至 ' + esc(asOf) : ''}</div>
     ${timeNote}
-    <div class="hint" style="margin-bottom:8px">每只标的一张卡；改「最新价」后倒T预估会全页更新。</div>` +
+    <div class="hint" style="margin-bottom:8px">点标的标题折叠/展开。改「最新价」后倒T预估会全页更新。</div>` +
     codes.map((code, idx) => {
       const list = byCode.get(code);
       const ref = refPriceForCode(code);
       const secType = coverSecType(code, list);
       const typeCls = 'group-' + (secType || 'stock');
       const altCls = 'group-i' + (idx % 2);
+      const open = uiOpen.covers.has(code) ? ' open' : '';
       const baseTip = (codeHasBaseLots(code) || codeHasRemainingLongs(code))
         ? `<div class="cover-base-tip">窗口内无多头可配；你可能还有底仓/剩余多头，见整体持仓</div>`
         : `<div class="cover-base-tip">窗口内无多头可配（先卖腿）</div>`;
-      return `<div class="group cover-card ${altCls} ${typeCls}" data-code="${esc(code)}">
+      return `<div class="group cover-card ${altCls} ${typeCls}${open}" data-code="${esc(code)}">
         <div class="group-head cover-card-head">
           <div class="group-head-top">
+            <span class="chev">▶</span>
             <span class="g-name">${esc(displayName(code))}</span>
             <span class="g-code">${esc(code)}</span>
             <span class="badge">${SEC_TYPE_LABEL[secType] || '股票'}</span>
-            <div class="g-meta">${list.length}笔待回补</div>
+            <div class="g-meta">${list.length}笔待回补<br>点开查看明细</div>
           </div>
+          ${codeOrderBtnsHtml()}
           <div class="group-quote cover-quote-bar">
             ${refQuoteInputHtml(code)}
           </div>
           ${baseTip}
         </div>
-        <div class="cover-card-body">
+        <div class="cover-card-body group-body">
         ${list.map((c) => {
           const est = ref.price > 0 ? estimateCoverAtRef(c, ref.price) : null;
           let advice = '';
@@ -558,6 +671,8 @@ function renderCoverPanel() {
       </div>`;
     }).join('');
   bindRefQuoteInputs(coverBox);
+  bindGroupToggle('#coverList', uiOpen.covers);
+  bindCodeOrderButtons('#coverList', codes);
 }
 
 function renderBreakevenPanel() {
@@ -581,15 +696,16 @@ function renderBreakevenPanel() {
     if (!byCode.has(w.code)) byCode.set(w.code, { sells: [], watches: [] });
     byCode.get(w.code).watches.push(w);
   }
-  const codes = Array.from(byCode.keys()).sort();
+  const codes = sortCodes(byCode.keys());
 
   beBox.innerHTML = `<div class="section-label">待扳本 · 亏损 ${losses.length} 笔${watches.length ? ' · 关注价 ' + watches.length : ''}</div>
-    <div class="hint" style="margin-bottom:8px">按标的分卡；亏损卖出的扳本决策 + 已钉关注价。改最新价会联动更新。</div>` +
+    <div class="hint" style="margin-bottom:8px">点标的标题折叠/展开。亏损卖出的扳本决策 + 已钉关注价。</div>` +
     codes.map((code, idx) => {
       const g = byCode.get(code);
       const secType = coverSecType(code, null);
       const typeCls = 'group-' + (secType || 'stock');
       const altCls = 'group-i' + (idx % 2);
+      const open = uiOpen.breakeven.has(code) ? ' open' : '';
       const sellHtml = g.sells.map((sell) => {
         const r = fullMatchResult.sells.get(sell.id);
         const net = r ? r.netPnl : 0;
@@ -622,17 +738,19 @@ function renderBreakevenPanel() {
           ${beHtml}
         </div>`;
       }).join('');
-      return `<div class="group cover-card watch-card ${altCls} ${typeCls}" data-code="${esc(code)}">
+      return `<div class="group cover-card watch-card ${altCls} ${typeCls}${open}" data-code="${esc(code)}">
         <div class="group-head cover-card-head">
           <div class="group-head-top">
+            <span class="chev">▶</span>
             <span class="g-name">${esc(displayName(code))}</span>
             <span class="g-code">${esc(code)}</span>
             <span class="badge">${SEC_TYPE_LABEL[secType] || '股票'}</span>
-            <div class="g-meta">${g.sells.length}笔亏损${g.watches.length ? ' · ' + g.watches.length + '关注' : ''}</div>
+            <div class="g-meta">${g.sells.length}笔亏损${g.watches.length ? ' · ' + g.watches.length + '关注' : ''}<br>点开查看明细</div>
           </div>
+          ${codeOrderBtnsHtml()}
           <div class="group-quote cover-quote-bar">${refQuoteInputHtml(code)}</div>
         </div>
-        <div class="cover-card-body">
+        <div class="cover-card-body group-body">
           ${sellHtml}${watchHtml}
         </div>
       </div>`;
@@ -646,6 +764,8 @@ function renderBreakevenPanel() {
     });
   });
   bindRefQuoteInputs(beBox);
+  bindGroupToggle('#breakevenList', uiOpen.breakeven);
+  bindCodeOrderButtons('#breakevenList', codes);
 }
 
 function renderCoverAndWatch() {
@@ -662,6 +782,16 @@ function renderCoverAndWatch() {
           <li>两者不是同一张账；可以都看，但分开算。</li>
         </ul>
       </details>`;
+    } else if (panel === 'stairs') {
+      helpBox.hidden = false;
+      helpBox.innerHTML = `<details class="match-help">
+        <summary>老太太扶楼梯怎么配？</summary>
+        <ul>
+          <li>只拿你选的近 N 天里的买卖互配，不跟更早成交配对。</li>
+          <li>卖价必须高于买价才算做T成功，并按股数拆单（卖200只消化200股的买）。</li>
+          <li>默认只列还没配完的买入；可「已做T隐藏」，和待做T相同。</li>
+        </ul>
+      </details>`;
     } else {
       helpBox.hidden = true;
       helpBox.innerHTML = '';
@@ -670,6 +800,115 @@ function renderCoverAndWatch() {
   syncLedgerPanelUI();
   if (panel === 'covers') renderCoverPanel();
   else if (panel === 'breakeven') renderBreakevenPanel();
+  else if (panel === 'stairs') renderStairsPanel();
+}
+
+function syncStairsDaysUI() {
+  const preset = String(Store.settings.stairsDaysPreset || '7');
+  $$('#stairsDaysSeg button').forEach((b) => b.classList.toggle('active', b.dataset.days === preset));
+  const days = stairsDayCount();
+  const inp = $('#stairsDaysInput');
+  if (inp && String(inp.value) !== String(days)) inp.value = String(days);
+  const row = $('#stairsDaysRow');
+  if (row) row.style.opacity = preset === 'custom' ? '1' : '0.85';
+  const hint = $('#stairsHint');
+  const fromDate = resolveStairsFromDate();
+  if (hint) {
+    hint.textContent = '统计 ' + fromDate + ' 至今天：只在这段日期里低买高卖拆单。更早的成交不参与。';
+  }
+}
+
+function renderStairsPanel() {
+  const box = $('#stairsList');
+  if (!box) return;
+  const showHidden = !!Store.settings.showHiddenLots;
+  const fromDate = resolveStairsFromDate();
+  const days = stairsDayCount();
+  const groups = new Map();
+  let hiddenCount = 0;
+  let remainLots = 0;
+  for (const t of Store.trades) {
+    if (t.side !== 'buy') continue;
+    if (t.date < fromDate) continue;
+    const lot = stairsMatchResult.lots.get(t.id);
+    if (!lot || lot.remainingQty <= 0) continue;
+    remainLots++;
+    if (t.tHidden) {
+      hiddenCount++;
+      if (!showHidden) continue;
+    }
+    if (!groups.has(t.code)) groups.set(t.code, []);
+    groups.get(t.code).push({ trade: t, remainingQty: lot.remainingQty });
+  }
+  const nEl = $('#panelCountStairs');
+  if (nEl) nEl.textContent = remainLots ? String(remainLots) : '';
+
+  const showHiddenEl = $('#showHiddenLots');
+  if (showHiddenEl) showHiddenEl.checked = showHidden;
+
+  if (!groups.size) {
+    box.innerHTML = hiddenCount && !showHidden
+      ? `<div class="empty">近${days}天未做完的买入都已隐藏（${hiddenCount}笔）<br>打开上方「显示已隐藏」可查看</div>`
+      : `<div class="empty">近${days}天（自 ${esc(fromDate)}）没有待做T买入<br>窗口内低买已被更高价卖出配完，或这几天没有买入</div>`;
+    return;
+  }
+
+  const codes = sortCodes(groups.keys());
+  const html = [];
+  codes.forEach((code, idx) => {
+    const arr = groups.get(code).slice().sort((a, b) => tradeTimeKey(b.trade).localeCompare(tradeTimeKey(a.trade)));
+    const st = codeStats(code, matchForCode(code));
+    const open = uiOpen.stairs.has(code) ? ' open' : '';
+    const secType = st.secType || 'stock';
+    const typeCls = 'group-' + secType;
+    const altCls = 'group-i' + (idx % 2);
+    const hiddenInGroup = arr.filter((x) => x.trade.tHidden).length;
+    html.push(`<div class="group ${altCls} ${typeCls}${open}" data-code="${esc(code)}">
+      <div class="group-head">
+        <div class="group-head-top">
+          <span class="chev">▶</span>
+          <span class="g-name">${esc(displayName(code))}</span>
+          <span class="g-code">${esc(code)}</span>
+          <button class="badge" data-act="cycle-type" data-code="${esc(code)}">${SEC_TYPE_LABEL[secType] || '股票'}</button>
+          <div class="g-meta">${arr.length}笔未做完${hiddenInGroup ? `（隐${hiddenInGroup}）` : ''}<br>点开查看明细</div>
+        </div>
+        ${codeOrderBtnsHtml()}
+        <div class="group-stats">
+          <div class="gs"><div class="v">${fmt(st.holdQty, 0)}</div><div class="k">持仓总量</div></div>
+          <div class="gs"><div class="v">${st.avgCost ? fmt(st.avgCost, 3) : '--'}</div><div class="k">成本价</div></div>
+          <div class="gs"><div class="v">${fmt(arr.reduce((s, x) => s + x.remainingQty, 0), 0)}</div><div class="k">窗口待做T股数</div></div>
+        </div>
+      </div>
+      <div class="group-body">
+        ${arr.map(({ trade, remainingQty }) => renderLot(trade, remainingQty)).join('')}
+      </div>
+    </div>`);
+  });
+  box.innerHTML = html.join('');
+  bindGroupToggle('#stairsList', uiOpen.stairs);
+  bindCodeOrderButtons('#stairsList', codes);
+  $$('#stairsList [data-act="cycle-type"]').forEach((b) => {
+    b.addEventListener('click', (e) => { e.stopPropagation(); cycleSecType(b.dataset.code); });
+  });
+  $$('#stairsList [data-act="del-trade"]').forEach((b) => {
+    b.addEventListener('click', () => deleteTrade(b.dataset.id));
+  });
+  $$('#stairsList [data-act="toggle-hide"]').forEach((b) => {
+    b.addEventListener('click', () => toggleLotHidden(b.dataset.id));
+  });
+  $$('#stairsList .est-input').forEach((inp) => {
+    inp.addEventListener('input', () => {
+      const id = inp.dataset.id;
+      const price = parseFloat(inp.value) || null;
+      Store.updateTrade(id, { estSell: price });
+      const t = Store.trades.find((x) => x.id === id);
+      const lot = t ? stairsMatchResult.lots.get(id) : null;
+      updateEstOut(inp.closest('.lot-est'), t, lot ? lot.remainingQty : 0);
+    });
+    const t = Store.trades.find((x) => x.id === inp.dataset.id);
+    const lot = t ? stairsMatchResult.lots.get(t.id) : null;
+    if (t && lot) updateEstOut(inp.closest('.lot-est'), t, lot.remainingQty);
+  });
 }
 
 function bindGroupToggle(listSel, openSet) {
@@ -782,11 +1021,10 @@ function renderLedger() {
     return;
   }
 
-  const dir = Store.settings.lotSort === 'desc' ? -1 : 1;
   const html = [];
-  const codes = Array.from(groups.keys()).sort();
+  const codes = sortCodes(groups.keys());
   codes.forEach((code, idx) => {
-    const arr = groups.get(code).sort((a, b) => (a.trade.price - b.trade.price) * dir);
+    const arr = sortLotRows(groups.get(code).slice());
     const st = codeStats(code, matchForCode(code));
     const open = uiOpen.ledger.has(code) ? ' open' : '';
     const floatText = st.floatPnl == null ? '--' : fmtSign(st.floatPnl);
@@ -807,6 +1045,7 @@ function renderLedger() {
           <button class="badge" data-act="cycle-type" data-code="${esc(code)}">${SEC_TYPE_LABEL[st.secType] || '股票'}</button>
           <div class="g-meta">${arr.length}笔待做T${hiddenInGroup ? `（隐${hiddenInGroup}）` : ''}${unprofTag}<br>点开查看明细</div>
         </div>
+        ${codeOrderBtnsHtml()}
         <div class="group-stats">
           <div class="gs"><div class="v">${fmt(st.holdQty, 0)}</div><div class="k">持仓总量</div></div>
           <div class="gs"><div class="v">${st.avgCost ? fmt(st.avgCost, 3) : '--'}</div><div class="k">成本价</div></div>
@@ -855,6 +1094,7 @@ function renderLedger() {
   $$('#ledgerList [data-act="toggle-hide"]').forEach((b) => {
     b.addEventListener('click', () => toggleLotHidden(b.dataset.id));
   });
+  bindCodeOrderButtons('#ledgerList', codes);
 }
 
 function renderLot(t, remainingQty) {
@@ -971,7 +1211,7 @@ function renderSells() {
   }
 
   const html = [];
-  const codes = Array.from(byCode.keys()).sort();
+  const codes = sortCodes(byCode.keys());
   codes.forEach((code, idx) => {
     const list = byCode.get(code);
     const st = codeStats(code, matchForCode(code));
@@ -988,6 +1228,7 @@ function renderSells() {
           <span class="g-code">${esc(code)}</span>
           <div class="g-meta">${list.length}笔${filterLabel}<br>点开查看明细</div>
         </div>
+        ${codeOrderBtnsHtml()}
         <div class="group-stats">
           <div class="gs"><div class="v">${fmt(st.holdQty, 0)}</div><div class="k">持仓总量</div></div>
           <div class="gs"><div class="v">${st.avgCost ? fmt(st.avgCost, 3) : '--'}</div><div class="k">成本价</div></div>
@@ -1007,6 +1248,7 @@ function renderSells() {
   box.innerHTML = html.join('');
 
   bindGroupToggle('#sellList', uiOpen.sells);
+  bindCodeOrderButtons('#sellList', codes);
   $$('#sellList [data-act="del-trade"]').forEach((b) => {
     b.addEventListener('click', () => deleteTrade(b.dataset.id));
   });
@@ -1157,6 +1399,52 @@ $$('#ledgerPanelSeg button').forEach((b) => {
     renderAll();
   });
 });
+$$('#stairsDaysSeg button').forEach((b) => {
+  b.addEventListener('click', () => {
+    Store.settings.stairsDaysPreset = b.dataset.days;
+    if (b.dataset.days !== 'custom') Store.settings.stairsDays = Number(b.dataset.days);
+    Store.save();
+    recompute();
+    renderAll();
+  });
+});
+const stairsDaysInput = $('#stairsDaysInput');
+if (stairsDaysInput) {
+  stairsDaysInput.addEventListener('change', () => {
+    const n = Math.max(1, Math.floor(Number(stairsDaysInput.value) || 7));
+    Store.settings.stairsDays = n;
+    Store.settings.stairsDaysPreset = (n === 1 || n === 2 || n === 7) ? String(n) : 'custom';
+    Store.save();
+    recompute();
+    renderAll();
+  });
+}
+function presentCodesForOrder() {
+  const sellsView = $('#view-sells');
+  if (sellsView && !sellsView.hidden) {
+    const nodes = $$('#sellList .group[data-code]');
+    if (nodes.length) return nodes.map((g) => g.dataset.code);
+  }
+  const map = {
+    lots: '#ledgerList',
+    covers: '#coverList',
+    breakeven: '#breakevenList',
+    stairs: '#stairsList',
+  };
+  const sel = map[currentLedgerPanel()] || '#ledgerList';
+  const nodes = $$(sel + ' .group[data-code]');
+  if (nodes.length) return nodes.map((g) => g.dataset.code);
+  const set = new Set();
+  for (const t of Store.trades) if (t.code) set.add(t.code);
+  return Array.from(set);
+}
+function onSortByMarketValue() {
+  applyCodeMove('', 'mv', presentCodesForOrder());
+}
+const btnSortByMv = $('#btnSortByMv');
+if (btnSortByMv) btnSortByMv.addEventListener('click', onSortByMarketValue);
+const btnSortByMvSells = $('#btnSortByMvSells');
+if (btnSortByMvSells) btnSortByMvSells.addEventListener('click', onSortByMarketValue);
 function syncMatchModeUI() {
   const mode = currentMatchMode();
   $$('#matchModeSeg button').forEach((b) => b.classList.toggle('active', b.dataset.mode === mode));

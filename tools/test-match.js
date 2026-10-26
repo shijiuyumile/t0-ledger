@@ -3,9 +3,9 @@
 const fs = require('fs');
 const path = require('path');
 const read = (f) => fs.readFileSync(path.join(__dirname, '..', 'js', f), 'utf8');
-const { calcFees, DEFAULT_FEE_RULES, computeMatches, estimateLotProfit } = new Function(
+const { calcFees, DEFAULT_FEE_RULES, computeMatches, computeStairsMatches, estimateLotProfit } = new Function(
   read('fees.js') + '\n' + read('match.js') +
-  '\nreturn { calcFees, DEFAULT_FEE_RULES, computeMatches, estimateLotProfit };'
+  '\nreturn { calcFees, DEFAULT_FEE_RULES, computeMatches, computeStairsMatches, estimateLotProfit };'
 )();
 
 let failed = 0;
@@ -142,6 +142,19 @@ expect('场景9 近价买单仍剩', r9.lots.get(trades9[1].id).remainingQty, 10
 // 场景10：默认仍为 closest
 const r10 = computeMatches(trades9);
 expect('场景10 默认closest配近价', r10.sells.get(trades9[2].id).pairs[0].buyPrice, 3.50);
+
+// 场景11：扶楼梯窗口内低买高卖按量拆单，不配更早买单、不配更贵买单
+const trades11 = [
+  mkD('buy', 3.20, 1000, '2026-08-01', '09:30:00'),
+  mkD('buy', 3.40, 500, '2026-09-10', '09:30:00'),
+  mkD('buy', 3.70, 500, '2026-09-10', '10:00:00'),
+  mkD('sell', 3.60, 200, '2026-09-10', '14:00:00'),
+];
+const r11 = computeStairsMatches(trades11, { fromDate: '2026-09-10' });
+expect('场景11 窗口外买单不参与', r11.lots.get(trades11[0].id).remainingQty, 0);
+expect('场景11 低价买剩300', r11.lots.get(trades11[1].id).remainingQty, 300);
+expect('场景11 低价买已配200', r11.lots.get(trades11[1].id).matchedQty, 200);
+expect('场景11 更贵买不配', r11.lots.get(trades11[2].id).remainingQty, 500);
 
 console.log(failed ? `\n${failed} 项失败` : '\n全部通过');
 process.exit(failed ? 1 : 0);

@@ -32,8 +32,12 @@ const Store = {
     if (s.tFromDate == null) s.tFromDate = '';
     if (!s.unprofitableDisplay) s.unprofitableDisplay = 'tWindow'; // tWindow | full
     if (!s.matchMode) s.matchMode = 'closest'; // closest | time
-    if (!s.ledgerPanel) s.ledgerPanel = 'lots'; // lots | covers | breakeven
+    if (!s.ledgerPanel) s.ledgerPanel = 'lots'; // lots | covers | breakeven | stairs
     if (!Array.isArray(s.watchPrices)) s.watchPrices = [];
+    if (!s.stairsDaysPreset) s.stairsDaysPreset = '7'; // 1 | 2 | 7 | custom
+    if (!(Number(s.stairsDays) > 0)) s.stairsDays = 7;
+    if (!Array.isArray(s.codeOrder)) s.codeOrder = [];
+    if (!s.codeOrderMode) s.codeOrderMode = 'custom'; // custom | marketValue
     return this.data;
   },
 

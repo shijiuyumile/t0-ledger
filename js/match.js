@@ -259,6 +259,79 @@ function pickClosestBuy(sellPrice, candidates, lots) {
   return bestBelow || bestAbove;
 }
 
+/** 只配买价严格低于卖价的买单（低买高卖），数量拆单与价格最相近相同 */
+function pickClosestBuyBelow(sellPrice, candidates, lots) {
+  let best = null;
+  for (const b of candidates) {
+    const lot = lots.get(b.id);
+    if (!lot || lot.remainingQty <= 0) continue;
+    if (!(b.price < sellPrice)) continue;
+    if (!best || b.price > best.price ||
+        (b.price === best.price && tradeTimeKey(b) < tradeTimeKey(best))) {
+      best = b;
+    }
+  }
+  return best;
+}
+
+/**
+ * 老太太扶楼梯：只在 fromDate 起的窗口内撮合。
+ * 卖出仅消化卖价高于买价的买单，按量拆单；窗口外成交不参与。
+ */
+function computeStairsMatches(trades, opts) {
+  const fromDate = opts && opts.fromDate ? String(opts.fromDate) : '';
+  const lots = new Map();
+  const sells = new Map();
+  const buysByCode = new Map();
+
+  for (const t of trades) {
+    if (t.side !== 'buy') continue;
+    const inWin = !fromDate || t.date >= fromDate;
+    lots.set(t.id, {
+      remainingQty: inWin ? t.qty : 0,
+      matchedQty: 0,
+      matches: [],
+      isBase: !inWin,
+    });
+    if (!inWin) continue;
+    if (!buysByCode.has(t.code)) buysByCode.set(t.code, []);
+    buysByCode.get(t.code).push(t);
+  }
+
+  const sellTrades = trades
+    .filter((t) => t.side === 'sell' && (!fromDate || t.date >= fromDate))
+    .sort((a, b) => tradeTimeKey(a).localeCompare(tradeTimeKey(b)) || (a.seq || 0) - (b.seq || 0));
+
+  for (const sell of sellTrades) {
+    const candidates = buysByCode.get(sell.code) || [];
+    const r = emptySellResult();
+    let remaining = sell.qty;
+
+    while (remaining > 0) {
+      const pick = pickClosestBuyBelow(sell.price, candidates, lots);
+      if (!pick) break;
+      const lot = lots.get(pick.id);
+      const q = Math.min(remaining, lot.remainingQty);
+      lot.remainingQty -= q;
+      lot.matchedQty += q;
+      lot.matches.push({ sellId: sell.id, qty: q, sellPrice: sell.price });
+      const share = totalFees(pick.fees) * (q / pick.qty);
+      r.buyFeeShare += share;
+      r.grossPnl += (sell.price - pick.price) * q;
+      r.pairs.push({
+        buyId: pick.id, qty: q, buyPrice: pick.price, buyDate: pick.date,
+        buyFeeShare: round2(share), kind: 'long',
+      });
+      r.matchedQty += q;
+      remaining -= q;
+    }
+
+    sells.set(sell.id, finalizeSellResult(sell, r));
+  }
+
+  return { lots, sells, pendingCovers: [], mode: 'stairs' };
+}
+
 function estimateLotProfit(buyTrade, remainingQty, estPrice, feeRules) {
   if (!estPrice || estPrice <= 0 || remainingQty <= 0) return null;
   const sellAmount = estPrice * remainingQty;
