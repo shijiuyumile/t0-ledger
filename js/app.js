@@ -1047,12 +1047,14 @@ function renderLedger() {
   for (const arr of groups.values()) totalLots += arr.length;
   const lotsCountEl = $('#panelCountLots');
   if (lotsCountEl) lotsCountEl.textContent = totalLots ? String(totalLots) : '';
-  const ap = accountPnl();
-  const modeLabel = tMode ? '做T时间' : '整体持仓';
-  $('#ledgerSummary').innerHTML = `
+  if (currentLedgerPanel() !== 'stairs') {
+    const ap = accountPnl();
+    const modeLabel = tMode ? '做T时间' : '整体持仓';
+    $('#ledgerSummary').innerHTML = `
     <div class="sum-item"><div class="v ${pnlClass(ap.total)}">${fmtSign(ap.total)}</div><div class="k">账户总盈亏·对齐涨乐</div></div>
     <div class="sum-item"><div class="v">${groups.size}</div><div class="k">持仓标的</div></div>
     <div class="sum-item"><div class="v">${totalLots}${hiddenCount && !showHidden ? `<span style="font-size:11px;font-weight:500;color:var(--text2)">/${hiddenCount}隐</span>` : ''}</div><div class="k">待做T·${modeLabel}</div></div>`;
+  }
 
   const showHiddenEl = $('#showHiddenLots');
   if (showHiddenEl) showHiddenEl.checked = showHidden;
