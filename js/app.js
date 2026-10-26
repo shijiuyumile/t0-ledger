@@ -1102,6 +1102,65 @@ function renderLedger() {
   bindCodeOrderButtons('#ledgerList', codes);
 }
 
+function lotForRender(t) {
+  if (currentLedgerPanel() === 'stairs') return stairsMatchResult.lots.get(t.id);
+  return matchForCode(t.code).lots.get(t.id);
+}
+
+/** 该买入已配对部分：买价、卖价、扣费净利 */
+function lotMatchedSummary(t, lot) {
+  const matches = (lot && lot.matches) || [];
+  if (!matches.length) {
+    return { matchedQty: 0, avgSell: 0, net: 0, lines: [] };
+  }
+  let matchedQty = 0;
+  let sellAmt = 0;
+  let sellFee = 0;
+  const lines = [];
+  for (const m of matches) {
+    matchedQty += m.qty;
+    sellAmt += m.sellPrice * m.qty;
+    const sell = Store.trades.find((x) => x.id === m.sellId);
+    if (sell && sell.qty > 0) sellFee += totalFees(sell.fees) * (m.qty / sell.qty);
+    lines.push({
+      price: m.sellPrice,
+      qty: m.qty,
+      date: sell ? sell.date : '',
+    });
+  }
+  const buyFee = totalFees(t.fees) * (matchedQty / t.qty);
+  const gross = sellAmt - t.price * matchedQty;
+  return {
+    matchedQty,
+    avgSell: matchedQty > 0 ? sellAmt / matchedQty : 0,
+    net: round2(gross - sellFee - buyFee),
+    lines,
+  };
+}
+
+function hiddenLotTallyHtml(t, remainingQty) {
+  if (!t.tHidden) return '';
+  const sum = lotMatchedSummary(t, lotForRender(t));
+  if (sum.matchedQty <= 0) {
+    return `<div class="lot-tally">
+      <div>买入 ${fmt(t.price, 3)} × ${fmt(t.qty, 0)}股</div>
+      <div class="hint-inline">系统未配到卖出（你已手动隐藏）</div>
+    </div>`;
+  }
+  const sellText = sum.lines.map((s) =>
+    `${fmt(s.price, 3)}×${fmt(s.qty, 0)}股${s.date ? '（' + esc(s.date) + '）' : ''}`
+  ).join('，');
+  const avg = sum.lines.length > 1 ? ` · 均价 ${fmt(sum.avgSell, 3)}` : '';
+  const left = remainingQty > 0
+    ? `<div class="hint-inline">还剩 ${fmt(remainingQty, 0)}股未配完</div>` : '';
+  return `<div class="lot-tally">
+    <div>买入 ${fmt(t.price, 3)} × ${fmt(sum.matchedQty, 0)}股</div>
+    <div>卖出 ${sellText}${avg}</div>
+    <div class="lot-tally-net ${pnlClass(sum.net)}">扣费后净利 ${fmtSign(sum.net)}</div>
+    ${left}
+  </div>`;
+}
+
 function renderLot(t, remainingQty) {
   const partly = remainingQty < t.qty ? `（原${fmt(t.qty, 0)}股，已配对${fmt(t.qty - remainingQty, 0)}）` : '';
   const hidden = !!t.tHidden;
@@ -1111,6 +1170,7 @@ function renderLot(t, remainingQty) {
       <span class="lot-qty">${fmt(remainingQty, 0)}股${partly}</span>
       <span class="lot-date">${esc(t.date)} ${esc(t.time || '')}</span>
     </div>
+    ${hiddenLotTallyHtml(t, remainingQty)}
     <div class="lot-fees">买入费用：${feeText(t.fees)}${t.feeSource === 'statement' ? '（交割单）' : '（按费率估算）'}</div>
     <div class="lot-est">
       <label>预估卖价</label>
