@@ -594,6 +594,8 @@ function syncLedgerPanelUI() {
   if (beBox) beBox.hidden = panel !== 'breakeven';
   if (stairsBox) stairsBox.hidden = panel !== 'stairs';
   if (lotBox) lotBox.hidden = panel !== 'lots';
+  const hiddenLab = $('#showHiddenLabel');
+  if (hiddenLab) hiddenLab.textContent = panel === 'stairs' ? '显示已做T成功' : '显示已隐藏';
   syncStairsDaysUI();
 }
 
@@ -792,8 +794,9 @@ function renderCoverAndWatch() {
         <summary>老太太扶楼梯怎么配？</summary>
         <ul>
           <li>只拿你选的近 N 天里的买卖互配，不跟更早成交配对。</li>
+          <li>买单必须早于卖出；后买不能配先卖。</li>
           <li>卖价必须高于买价才算做T成功，并按股数拆单（卖200只消化200股的买）。</li>
-          <li>默认只列还没配完的买入；可「已做T隐藏」，和待做T相同。</li>
+          <li>窗口内配完的买入默认收起。打开「显示已做T成功」可看买价、卖价和扣费净利。</li>
         </ul>
       </details>`;
     } else {
@@ -822,6 +825,14 @@ function syncStairsDaysUI() {
   }
 }
 
+function stairsWindowNet() {
+  let net = 0;
+  for (const r of stairsMatchResult.sells.values()) {
+    if (r && r.matchedQty > 0) net += r.netPnl;
+  }
+  return round2(net);
+}
+
 function renderStairsPanel() {
   const box = $('#stairsList');
   if (!box) return;
@@ -829,31 +840,62 @@ function renderStairsPanel() {
   const fromDate = resolveStairsFromDate();
   const days = stairsDayCount();
   const groups = new Map();
+  const codeCounts = new Map();
   let hiddenCount = 0;
   let remainLots = 0;
+  let successLots = 0;
+  const bump = (code) => {
+    if (!codeCounts.has(code)) codeCounts.set(code, { pending: 0, success: 0, hiddenManual: 0 });
+    return codeCounts.get(code);
+  };
   for (const t of Store.trades) {
     if (t.side !== 'buy') continue;
     if (t.date < fromDate) continue;
     const lot = stairsMatchResult.lots.get(t.id);
-    if (!lot || lot.remainingQty <= 0) continue;
-    remainLots++;
-    if (t.tHidden) {
+    if (!lot) continue;
+    const pending = lot.remainingQty > 0;
+    const done = lot.matchedQty > 0 && lot.remainingQty <= 0;
+    if (!pending && !done) continue;
+    const c = bump(t.code);
+    if (done) {
+      successLots++;
+      c.success++;
       hiddenCount++;
       if (!showHidden) continue;
+    } else {
+      remainLots++;
+      c.pending++;
+      if (t.tHidden) {
+        c.hiddenManual++;
+        hiddenCount++;
+        if (!showHidden) continue;
+      }
     }
     if (!groups.has(t.code)) groups.set(t.code, []);
-    groups.get(t.code).push({ trade: t, remainingQty: lot.remainingQty });
+    groups.get(t.code).push({ trade: t, remainingQty: lot.remainingQty, done: done });
   }
   const nEl = $('#panelCountStairs');
   if (nEl) nEl.textContent = remainLots ? String(remainLots) : '';
+  const winNet = stairsWindowNet();
+  const sumEl = $('#ledgerSummary');
+  if (sumEl) {
+    sumEl.innerHTML = `
+    <div class="sum-item"><div class="v ${pnlClass(winNet)}">${fmtSign(winNet)}</div><div class="k">近${days}天窗口扣费净利</div></div>
+    <div class="sum-item"><div class="v">${remainLots}</div><div class="k">未做完买入</div></div>
+    <div class="sum-item"><div class="v">${successLots}${successLots && !showHidden ? '<span style="font-size:11px;font-weight:500;color:var(--text2)">/点开显示</span>' : ''}</div><div class="k">做T成功买入</div></div>`;
+  }
 
   const showHiddenEl = $('#showHiddenLots');
   if (showHiddenEl) showHiddenEl.checked = showHidden;
 
   if (!groups.size) {
-    box.innerHTML = hiddenCount && !showHidden
-      ? `<div class="empty">近${days}天未做完的买入都已隐藏（${hiddenCount}笔）<br>打开上方「显示已隐藏」可查看</div>`
-      : `<div class="empty">近${days}天（自 ${esc(fromDate)}）没有待做T买入<br>窗口内低买已被更高价卖出配完，或这几天没有买入</div>`;
+    if (!showHidden && remainLots === 0 && successLots > 0) {
+      box.innerHTML = `<div class="empty">近${days}天买入已全部做T成功（${successLots}笔）<br>打开「显示已做T成功」可查看买卖价和扣费净利</div>`;
+    } else if (!showHidden && hiddenCount > 0) {
+      box.innerHTML = `<div class="empty">近${days}天未做完的买入都已隐藏（手动${hiddenCount - successLots}笔，做T成功${successLots}笔）<br>打开「显示已做T成功」可查看买卖价和扣费净利</div>`;
+    } else {
+      box.innerHTML = `<div class="empty">近${days}天（自 ${esc(fromDate)}）没有待做T买入<br>窗口内没有更早的低买可配更高卖，或这几天没有买入</div>`;
+    }
     return;
   }
 
@@ -866,7 +908,13 @@ function renderStairsPanel() {
     const secType = st.secType || 'stock';
     const typeCls = 'group-' + secType;
     const altCls = 'group-i' + (idx % 2);
-    const hiddenInGroup = arr.filter((x) => x.trade.tHidden).length;
+    const counts = codeCounts.get(code) || { pending: 0, success: 0, hiddenManual: 0 };
+    const pendingN = counts.pending;
+    const doneN = counts.success;
+    const pendingQty = arr.reduce((s, x) => s + (x.done ? 0 : x.remainingQty), 0);
+    const metaBits = [`${pendingN}笔未做完`];
+    if (doneN) metaBits.push(`${doneN}笔做T成功`);
+    if (!showHidden && counts.hiddenManual) metaBits.push(`手动隐${counts.hiddenManual}`);
     html.push(`<div class="group ${altCls} ${typeCls}${open}" data-code="${esc(code)}">
       <div class="group-head">
         <div class="group-head-top">
@@ -874,17 +922,17 @@ function renderStairsPanel() {
           <span class="g-name">${esc(displayName(code))}</span>
           <span class="g-code">${esc(code)}</span>
           <button class="badge" data-act="cycle-type" data-code="${esc(code)}">${SEC_TYPE_LABEL[secType] || '股票'}</button>
-          <div class="g-meta">${arr.length}笔未做完${hiddenInGroup ? `（隐${hiddenInGroup}）` : ''}<br>点开查看明细</div>
+          <div class="g-meta">${metaBits.join(' · ')}<br>点开查看明细</div>
         </div>
         ${codeOrderBtnsHtml()}
         <div class="group-stats">
           <div class="gs"><div class="v">${fmt(st.holdQty, 0)}</div><div class="k">持仓总量</div></div>
           <div class="gs"><div class="v">${st.avgCost ? fmt(st.avgCost, 3) : '--'}</div><div class="k">成本价</div></div>
-          <div class="gs"><div class="v">${fmt(arr.reduce((s, x) => s + x.remainingQty, 0), 0)}</div><div class="k">窗口待做T股数</div></div>
+          <div class="gs"><div class="v">${fmt(pendingQty, 0)}</div><div class="k">窗口待做T股数</div></div>
         </div>
       </div>
       <div class="group-body">
-        ${arr.map(({ trade, remainingQty }) => renderLot(trade, remainingQty)).join('')}
+        ${arr.map(({ trade, remainingQty, done }) => renderLot(trade, remainingQty, { done })).join('')}
       </div>
     </div>`);
   });
@@ -1138,10 +1186,15 @@ function lotMatchedSummary(t, lot) {
   };
 }
 
-function hiddenLotTallyHtml(t, remainingQty) {
-  if (!t.tHidden) return '';
+function hiddenLotTallyHtml(t, remainingQty, opts) {
   const sum = lotMatchedSummary(t, lotForRender(t));
+  const stairsMatched = currentLedgerPanel() === 'stairs' && sum.matchedQty > 0;
+  const force = !!(opts && opts.done);
+  if (!t.tHidden && !force && !stairsMatched) {
+    return '';
+  }
   if (sum.matchedQty <= 0) {
+    if (!t.tHidden) return '';
     return `<div class="lot-tally">
       <div>买入 ${fmt(t.price, 3)} × ${fmt(t.qty, 0)}股</div>
       <div class="hint-inline">系统未配到卖出（你已手动隐藏）</div>
@@ -1161,24 +1214,34 @@ function hiddenLotTallyHtml(t, remainingQty) {
   </div>`;
 }
 
-function renderLot(t, remainingQty) {
-  const partly = remainingQty < t.qty ? `（原${fmt(t.qty, 0)}股，已配对${fmt(t.qty - remainingQty, 0)}）` : '';
+function renderLot(t, remainingQty, opts) {
+  const done = !!(opts && opts.done);
+  const partly = remainingQty < t.qty && remainingQty > 0
+    ? `（原${fmt(t.qty, 0)}股，已配对${fmt(t.qty - remainingQty, 0)}）`
+    : '';
   const hidden = !!t.tHidden;
-  return `<div class="lot${hidden ? ' lot-hidden' : ''}">
-    <div class="lot-top">
-      <span class="lot-price">${fmt(t.price, 3)}</span>
-      <span class="lot-qty">${fmt(remainingQty, 0)}股${partly}</span>
-      <span class="lot-date">${esc(t.date)} ${esc(t.time || '')}</span>
-    </div>
-    ${hiddenLotTallyHtml(t, remainingQty)}
-    <div class="lot-fees">买入费用：${feeText(t.fees)}${t.feeSource === 'statement' ? '（交割单）' : '（按费率估算）'}</div>
-    <div class="lot-est">
+  const qtyText = done
+    ? `已全配 ${fmt(t.qty, 0)}股`
+    : `${fmt(remainingQty, 0)}股${partly}`;
+  const estHtml = done ? '' : `<div class="lot-est">
       <label>预估卖价</label>
       <input class="est-input" type="number" step="0.001" min="0" data-id="${t.id}" value="${t.estSell || ''}" placeholder="输入卖价">
       <div class="est-out"></div>
+    </div>`;
+  const hideBtn = done
+    ? ''
+    : `<button class="btn btn-mini btn-hide" data-act="toggle-hide" data-id="${t.id}">${hidden ? '取消隐藏' : '已做T隐藏'}</button>`;
+  return `<div class="lot${done ? ' lot-done' : (hidden ? ' lot-hidden' : '')}">
+    <div class="lot-top">
+      <span class="lot-price">${fmt(t.price, 3)}</span>
+      <span class="lot-qty">${qtyText}</span>
+      <span class="lot-date">${esc(t.date)} ${esc(t.time || '')}</span>
     </div>
+    ${hiddenLotTallyHtml(t, remainingQty, { done })}
+    <div class="lot-fees">买入费用：${feeText(t.fees)}${t.feeSource === 'statement' ? '（交割单）' : '（按费率估算）'}</div>
+    ${estHtml}
     <div class="lot-actions">
-      <button class="btn btn-mini btn-hide" data-act="toggle-hide" data-id="${t.id}">${hidden ? '取消隐藏' : '已做T隐藏'}</button>
+      ${hideBtn}
       <button class="btn btn-mini" data-act="del-trade" data-id="${t.id}">删除此笔</button>
     </div>
   </div>`;

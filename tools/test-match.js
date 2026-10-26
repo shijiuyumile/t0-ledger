@@ -156,5 +156,24 @@ expect('场景11 低价买剩300', r11.lots.get(trades11[1].id).remainingQty, 30
 expect('场景11 低价买已配200', r11.lots.get(trades11[1].id).matchedQty, 200);
 expect('场景11 更贵买不配', r11.lots.get(trades11[2].id).remainingQty, 500);
 
+// 场景12：扶楼梯不能用卖出之后才买的单来配
+const trades12 = [
+  mkD('sell', 3.60, 200, '2026-09-10', '10:00:00'),
+  mkD('buy', 3.40, 200, '2026-09-10', '14:00:00'),
+];
+const r12 = computeStairsMatches(trades12, { fromDate: '2026-09-10' });
+expect('场景12 后买不配先卖', r12.lots.get(trades12[1].id).remainingQty, 200);
+expect('场景12 先卖未配', r12.sells.get(trades12[0].id).matchedQty, 0);
+
+// 场景13：更早低买应配完，记做T成功
+const trades13 = [
+  mkD('buy', 3.40, 200, '2026-09-10', '09:30:00'),
+  mkD('sell', 3.60, 200, '2026-09-10', '14:00:00'),
+];
+const r13 = computeStairsMatches(trades13, { fromDate: '2026-09-10' });
+expect('场景13 低买配完', r13.lots.get(trades13[0].id).remainingQty, 0);
+expect('场景13 低买已配量', r13.lots.get(trades13[0].id).matchedQty, 200);
+expect('场景13 卖出全配', r13.sells.get(trades13[1].id).matchedQty, 200);
+
 console.log(failed ? `\n${failed} 项失败` : '\n全部通过');
 process.exit(failed ? 1 : 0);

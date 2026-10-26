@@ -259,13 +259,19 @@ function pickClosestBuy(sellPrice, candidates, lots) {
   return bestBelow || bestAbove;
 }
 
-/** 只配买价严格低于卖价的买单（低买高卖），数量拆单与价格最相近相同 */
-function pickClosestBuyBelow(sellPrice, candidates, lots) {
+function tradeOrderKey(t) {
+  return tradeTimeKey(t) + '\t' + String(t.seq || 0).padStart(8, '0');
+}
+
+/** 只配：更早买入、且买价严格低于卖价。数量拆单与价格最相近相同 */
+function pickClosestBuyBelow(sell, candidates, lots) {
+  const sellKey = tradeOrderKey(sell);
   let best = null;
   for (const b of candidates) {
     const lot = lots.get(b.id);
     if (!lot || lot.remainingQty <= 0) continue;
-    if (!(b.price < sellPrice)) continue;
+    if (tradeOrderKey(b) >= sellKey) continue;
+    if (!(b.price < sell.price)) continue;
     if (!best || b.price > best.price ||
         (b.price === best.price && tradeTimeKey(b) < tradeTimeKey(best))) {
       best = b;
@@ -308,7 +314,7 @@ function computeStairsMatches(trades, opts) {
     let remaining = sell.qty;
 
     while (remaining > 0) {
-      const pick = pickClosestBuyBelow(sell.price, candidates, lots);
+      const pick = pickClosestBuyBelow(sell, candidates, lots);
       if (!pick) break;
       const lot = lots.get(pick.id);
       const q = Math.min(remaining, lot.remainingQty);
