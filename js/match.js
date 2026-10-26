@@ -259,18 +259,12 @@ function pickClosestBuy(sellPrice, candidates, lots) {
   return bestBelow || bestAbove;
 }
 
-function tradeOrderKey(t) {
-  return tradeTimeKey(t) + '\t' + String(t.seq || 0).padStart(8, '0');
-}
-
-/** 只配：更早买入、且买价严格低于卖价。数量拆单与价格最相近相同 */
+/** 只配买价严格低于卖价的买单。不限买卖先后。数量拆单与价格最相近相同 */
 function pickClosestBuyBelow(sell, candidates, lots) {
-  const sellKey = tradeOrderKey(sell);
   let best = null;
   for (const b of candidates) {
     const lot = lots.get(b.id);
     if (!lot || lot.remainingQty <= 0) continue;
-    if (tradeOrderKey(b) >= sellKey) continue;
     if (!(b.price < sell.price)) continue;
     if (!best || b.price > best.price ||
         (b.price === best.price && tradeTimeKey(b) < tradeTimeKey(best))) {
@@ -281,8 +275,8 @@ function pickClosestBuyBelow(sell, candidates, lots) {
 }
 
 /**
- * 老太太扶楼梯：只在 fromDate 起的窗口内撮合。
- * 卖出仅消化卖价高于买价的买单，按量拆单；窗口外成交不参与。
+ * 老太太扶楼梯：只在 fromDate 起的窗口内撮合（空窗口=全部成交）。
+ * 卖出仅消化卖价高于买价的买单，按量拆单，不限买卖先后；窗口外成交不参与。
  */
 function computeStairsMatches(trades, opts) {
   const fromDate = opts && opts.fromDate ? String(opts.fromDate) : '';

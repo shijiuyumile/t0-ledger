@@ -156,14 +156,15 @@ expect('场景11 低价买剩300', r11.lots.get(trades11[1].id).remainingQty, 30
 expect('场景11 低价买已配200', r11.lots.get(trades11[1].id).matchedQty, 200);
 expect('场景11 更贵买不配', r11.lots.get(trades11[2].id).remainingQty, 500);
 
-// 场景12：扶楼梯不能用卖出之后才买的单来配
+// 场景12：周期内不限先后，后买也可配先卖
 const trades12 = [
   mkD('sell', 3.60, 200, '2026-09-10', '10:00:00'),
   mkD('buy', 3.40, 200, '2026-09-10', '14:00:00'),
 ];
 const r12 = computeStairsMatches(trades12, { fromDate: '2026-09-10' });
-expect('场景12 后买不配先卖', r12.lots.get(trades12[1].id).remainingQty, 200);
-expect('场景12 先卖未配', r12.sells.get(trades12[0].id).matchedQty, 0);
+expect('场景12 后买可配先卖', r12.lots.get(trades12[1].id).remainingQty, 0);
+expect('场景12 后买已配量', r12.lots.get(trades12[1].id).matchedQty, 200);
+expect('场景12 先卖全配', r12.sells.get(trades12[0].id).matchedQty, 200);
 
 // 场景13：更早低买应配完，记做T成功
 const trades13 = [

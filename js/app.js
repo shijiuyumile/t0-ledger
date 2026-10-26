@@ -69,14 +69,25 @@ function currentLedgerPanel() {
   return 'lots';
 }
 
+function isStairsAll() {
+  return String(Store.settings.stairsDaysPreset || '') === 'all';
+}
+
 function stairsDayCount() {
   const p = String(Store.settings.stairsDaysPreset || '7');
-  if (p === '1' || p === '2' || p === '7') return Number(p);
+  if (p === 'all') return 0;
+  if (p === '1' || p === '2' || p === '7' || p === '30') return Number(p);
   return Math.max(1, Math.floor(Number(Store.settings.stairsDays) || 7));
 }
 
 function resolveStairsFromDate() {
+  if (isStairsAll()) return '';
   return addDaysISO(todayISO(), -(stairsDayCount() - 1));
+}
+
+function stairsWindowLabel() {
+  if (isStairsAll()) return '全部';
+  return '近' + stairsDayCount() + '天';
 }
 
 function matchOpts(extra) {
@@ -793,9 +804,8 @@ function renderCoverAndWatch() {
       helpBox.innerHTML = `<details class="match-help">
         <summary>老太太扶楼梯怎么配？</summary>
         <ul>
-          <li>只拿你选的近 N 天里的买卖互配，不跟更早成交配对。</li>
-          <li>买单必须早于卖出；后买不能配先卖。</li>
-          <li>卖价必须高于买价才算做T成功，并按股数拆单（卖200只消化200股的买）。</li>
+          <li>只拿你选的统计周期里的买卖互配（可选全部成交），不跟周期外成交配对。</li>
+          <li>周期内同一标的，卖价高于买价即可按股数拆单，不限买卖先后。</li>
           <li>窗口内配完的买入默认收起。打开「显示已做T成功」可看买价、卖价和扣费净利。</li>
         </ul>
       </details>`;
@@ -815,13 +825,18 @@ function syncStairsDaysUI() {
   $$('#stairsDaysSeg button').forEach((b) => b.classList.toggle('active', b.dataset.days === preset));
   const days = stairsDayCount();
   const inp = $('#stairsDaysInput');
-  if (inp && String(inp.value) !== String(days)) inp.value = String(days);
+  if (inp && preset !== 'all' && String(inp.value) !== String(days)) inp.value = String(days);
   const row = $('#stairsDaysRow');
-  if (row) row.style.opacity = preset === 'custom' ? '1' : '0.85';
+  if (row) {
+    row.hidden = preset === 'all';
+    row.style.opacity = preset === 'custom' ? '1' : '0.85';
+  }
   const hint = $('#stairsHint');
   const fromDate = resolveStairsFromDate();
   if (hint) {
-    hint.textContent = '统计 ' + fromDate + ' 至今天：只在这段日期里低买高卖拆单。更早的成交不参与。';
+    hint.textContent = isStairsAll()
+      ? '全部成交：同一标的卖价高于买价即可按量拆单，不限买卖先后。'
+      : ('统计 ' + fromDate + ' 至今天：只在这段日期里低买高卖拆单，不限买卖先后。更早的成交不参与。');
   }
 }
 
@@ -838,7 +853,7 @@ function renderStairsPanel() {
   if (!box) return;
   const showHidden = !!Store.settings.showHiddenLots;
   const fromDate = resolveStairsFromDate();
-  const days = stairsDayCount();
+  const daysLabel = stairsWindowLabel();
   const groups = new Map();
   const codeCounts = new Map();
   let hiddenCount = 0;
@@ -850,7 +865,7 @@ function renderStairsPanel() {
   };
   for (const t of Store.trades) {
     if (t.side !== 'buy') continue;
-    if (t.date < fromDate) continue;
+    if (fromDate && t.date < fromDate) continue;
     const lot = stairsMatchResult.lots.get(t.id);
     if (!lot) continue;
     const pending = lot.remainingQty > 0;
@@ -880,7 +895,7 @@ function renderStairsPanel() {
   const sumEl = $('#ledgerSummary');
   if (sumEl) {
     sumEl.innerHTML = `
-    <div class="sum-item"><div class="v ${pnlClass(winNet)}">${fmtSign(winNet)}</div><div class="k">近${days}天窗口扣费净利</div></div>
+    <div class="sum-item"><div class="v ${pnlClass(winNet)}">${fmtSign(winNet)}</div><div class="k">${daysLabel}窗口扣费净利</div></div>
     <div class="sum-item"><div class="v">${remainLots}</div><div class="k">未做完买入</div></div>
     <div class="sum-item"><div class="v">${successLots}${successLots && !showHidden ? '<span style="font-size:11px;font-weight:500;color:var(--text2)">/点开显示</span>' : ''}</div><div class="k">做T成功买入</div></div>`;
   }
@@ -890,11 +905,11 @@ function renderStairsPanel() {
 
   if (!groups.size) {
     if (!showHidden && remainLots === 0 && successLots > 0) {
-      box.innerHTML = `<div class="empty">近${days}天买入已全部做T成功（${successLots}笔）<br>打开「显示已做T成功」可查看买卖价和扣费净利</div>`;
+      box.innerHTML = `<div class="empty">${daysLabel}买入已全部做T成功（${successLots}笔）<br>打开「显示已做T成功」可查看买卖价和扣费净利</div>`;
     } else if (!showHidden && hiddenCount > 0) {
-      box.innerHTML = `<div class="empty">近${days}天未做完的买入都已隐藏（手动${hiddenCount - successLots}笔，做T成功${successLots}笔）<br>打开「显示已做T成功」可查看买卖价和扣费净利</div>`;
+      box.innerHTML = `<div class="empty">${daysLabel}未做完的买入都已隐藏（手动${hiddenCount - successLots}笔，做T成功${successLots}笔）<br>打开「显示已做T成功」可查看买卖价和扣费净利</div>`;
     } else {
-      box.innerHTML = `<div class="empty">近${days}天（自 ${esc(fromDate)}）没有待做T买入<br>窗口内没有更早的低买可配更高卖，或这几天没有买入</div>`;
+      box.innerHTML = `<div class="empty">${daysLabel}${fromDate ? '（自 ' + esc(fromDate) + '）' : ''}没有待做T买入<br>周期内没有买价低于卖价的可配买入</div>`;
     }
     return;
   }
@@ -1532,7 +1547,7 @@ $$('#ledgerPanelSeg button').forEach((b) => {
 $$('#stairsDaysSeg button').forEach((b) => {
   b.addEventListener('click', () => {
     Store.settings.stairsDaysPreset = b.dataset.days;
-    if (b.dataset.days !== 'custom') Store.settings.stairsDays = Number(b.dataset.days);
+    if (b.dataset.days !== 'custom' && b.dataset.days !== 'all') Store.settings.stairsDays = Number(b.dataset.days);
     Store.save();
     recompute();
     renderAll();
@@ -1543,7 +1558,7 @@ if (stairsDaysInput) {
   stairsDaysInput.addEventListener('change', () => {
     const n = Math.max(1, Math.floor(Number(stairsDaysInput.value) || 7));
     Store.settings.stairsDays = n;
-    Store.settings.stairsDaysPreset = (n === 1 || n === 2 || n === 7) ? String(n) : 'custom';
+    Store.settings.stairsDaysPreset = (n === 1 || n === 2 || n === 7 || n === 30) ? String(n) : 'custom';
     Store.save();
     recompute();
     renderAll();
