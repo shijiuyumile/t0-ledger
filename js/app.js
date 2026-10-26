@@ -584,7 +584,9 @@ function syncLedgerPanelUI() {
   const lotBox = $('#ledgerList');
   if (toolbar) toolbar.hidden = panel !== 'lots' && panel !== 'stairs';
   const sortSeg = $('#lotSortSeg');
-  if (sortSeg) sortSeg.hidden = panel !== 'lots';
+  if (sortSeg) sortSeg.hidden = panel !== 'lots' && panel !== 'stairs';
+  const tWin = $('#tWindowControls');
+  if (tWin && panel === 'stairs') tWin.hidden = true;
   if (stairsControls) stairsControls.hidden = panel !== 'stairs';
   if (coverBox) coverBox.hidden = panel !== 'covers';
   if (beBox) beBox.hidden = panel !== 'breakeven';
@@ -856,7 +858,7 @@ function renderStairsPanel() {
   const codes = sortCodes(groups.keys());
   const html = [];
   codes.forEach((code, idx) => {
-    const arr = groups.get(code).slice().sort((a, b) => tradeTimeKey(b.trade).localeCompare(tradeTimeKey(a.trade)));
+    const arr = sortLotRows(groups.get(code).slice());
     const st = codeStats(code, matchForCode(code));
     const open = uiOpen.stairs.has(code) ? ' open' : '';
     const secType = st.secType || 'stock';
@@ -942,8 +944,9 @@ function syncLedgerModeUI() {
   const mode = Store.settings.ledgerMode || 'full';
   $$('#ledgerModeSeg button').forEach((b) => b.classList.toggle('active', b.dataset.mode === mode));
   const controls = $('#tWindowControls');
-  if (controls) controls.hidden = mode !== 'tWindow';
-  if (mode !== 'tWindow') return;
+  const hideTWin = mode !== 'tWindow' || currentLedgerPanel() === 'stairs';
+  if (controls) controls.hidden = hideTWin;
+  if (hideTWin) return;
 
   const preset = Store.settings.tWindowPreset || 'd5';
   $$('#tWindowPresetSeg button').forEach((b) => b.classList.toggle('active', b.dataset.preset === preset));
