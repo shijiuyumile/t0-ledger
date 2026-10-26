@@ -586,6 +586,8 @@ function syncLedgerPanelUI() {
   const sortSeg = $('#lotSortSeg');
   if (sortSeg) sortSeg.hidden = panel !== 'lots' && panel !== 'stairs';
   const tWin = $('#tWindowControls');
+  const modeSeg = $('#ledgerModeSeg');
+  if (modeSeg) modeSeg.hidden = panel === 'stairs';
   if (tWin && panel === 'stairs') tWin.hidden = true;
   if (stairsControls) stairsControls.hidden = panel !== 'stairs';
   if (coverBox) coverBox.hidden = panel !== 'covers';
