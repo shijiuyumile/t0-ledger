@@ -330,11 +330,16 @@ function sortLotRows(arr) {
   const s = Store.settings.lotSort || 'asc';
   if (s === 'dateDesc' || s === 'dateAsc') {
     const dir = s === 'dateDesc' ? -1 : 1;
-    arr.sort((a, b) => dir * tradeTimeKey(a.trade).localeCompare(tradeTimeKey(b.trade)));
+    arr.sort((a, b) =>
+      dir * tradeTimeKey(a.trade).localeCompare(tradeTimeKey(b.trade)) ||
+      (a.trade.price - b.trade.price));
     return arr;
   }
   const dir = s === 'desc' ? -1 : 1;
-  arr.sort((a, b) => (a.trade.price - b.trade.price) * dir);
+  // 同价时再按时间，保证扶楼梯未匹配单切换高低排序时稳定可读
+  arr.sort((a, b) =>
+    (a.trade.price - b.trade.price) * dir ||
+    tradeTimeKey(a.trade).localeCompare(tradeTimeKey(b.trade)));
   return arr;
 }
 
@@ -826,6 +831,7 @@ function renderCoverAndWatch() {
           <li>只拿你选的统计周期里的买卖互配（可选全部成交），不跟周期外成交配对。</li>
           <li><b>低买高卖</b>：卖价高于买价才配，按股数拆单，不限买卖先后。配完的买入可「显示已做T成功」查看净利。</li>
           <li><b>高买低卖</b>：单独拉出卖价低于买价的配对，看卖亏明细和扣费净亏。两套账不要混加。</li>
+          <li>每个标的展开后的买入明细，可用「价格从低到高 / 从高到低」排序，两种配对模式都生效。</li>
         </ul>
       </details>`;
     } else {
@@ -844,6 +850,9 @@ function syncStairsDaysUI() {
   $$('#stairsDaysSeg button').forEach((b) => b.classList.toggle('active', b.dataset.days === preset));
   const pair = isStairsLossMode() ? 'loss' : 'profit';
   $$('#stairsPairSeg button').forEach((b) => b.classList.toggle('active', b.dataset.pair === pair));
+  // 扶楼梯页价格排序只提供高低两种；若当前是日期排序，高亮默认「从低到高」
+  const stairsSort = Store.settings.lotSort === 'desc' ? 'desc' : 'asc';
+  $$('#stairsSortSeg button').forEach((b) => b.classList.toggle('active', b.dataset.sort === stairsSort));
   const days = stairsDayCount();
   const inp = $('#stairsDaysInput');
   if (inp && preset !== 'all' && String(inp.value) !== String(days)) inp.value = String(days);
@@ -855,10 +864,11 @@ function syncStairsDaysUI() {
   const hint = $('#stairsHint');
   const fromDate = resolveStairsFromDate();
   const winText = isStairsAll() ? '全部成交' : ('统计 ' + fromDate + ' 至今天');
+  const sortHint = stairsSort === 'desc' ? '明细按买价从高到低' : '明细按买价从低到高';
   if (hint) {
     hint.textContent = isStairsLossMode()
-      ? (winText + '：只拉出卖价低于买价的配对（高买低卖），按量拆单，不限先后。')
-      : (winText + '：卖价高于买价才配（低买高卖），按量拆单，不限先后。');
+      ? (winText + '：只拉出卖价低于买价的配对（高买低卖），按量拆单，不限先后。' + sortHint + '。')
+      : (winText + '：卖价高于买价才配（低买高卖），按量拆单，不限先后。' + sortHint + '。');
   }
   const hiddenLab = $('#showHiddenLabel');
   if (hiddenLab) {
@@ -1627,7 +1637,14 @@ $$('#lotSortSeg button').forEach((b) => {
   b.addEventListener('click', () => {
     Store.settings.lotSort = b.dataset.sort;
     Store.save();
-    renderLedger();
+    renderAll();
+  });
+});
+$$('#stairsSortSeg button').forEach((b) => {
+  b.addEventListener('click', () => {
+    Store.settings.lotSort = b.dataset.sort === 'desc' ? 'desc' : 'asc';
+    Store.save();
+    renderAll();
   });
 });
 
