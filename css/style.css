@@ -63,6 +63,11 @@ body {
   content: '做T成功'; margin-left: 8px; font-size: 11px; font-weight: 600;
   color: var(--up); vertical-align: middle;
 }
+.lot.lot-loss { background: var(--down-bg); }
+.lot.lot-loss .lot-price::after {
+  content: '高买低卖'; margin-left: 8px; font-size: 11px; font-weight: 600;
+  color: var(--down); vertical-align: middle;
+}
 .lot-tally {
   margin: 8px 0 4px;
   padding: 8px 10px;

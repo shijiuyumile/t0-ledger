@@ -176,5 +176,21 @@ expect('场景13 低买配完', r13.lots.get(trades13[0].id).remainingQty, 0);
 expect('场景13 低买已配量', r13.lots.get(trades13[0].id).matchedQty, 200);
 expect('场景13 卖出全配', r13.sells.get(trades13[1].id).matchedQty, 200);
 
+// 场景14：高买低卖——卖价低于买价才配，取更接近的更高买
+const trades14 = [
+  mkD('buy', 3.70, 500, '2026-09-10', '09:30:00'),
+  mkD('buy', 3.50, 500, '2026-09-10', '10:00:00'),
+  mkD('sell', 3.40, 200, '2026-09-10', '14:00:00'),
+];
+const r14 = computeStairsMatches(trades14, { fromDate: '2026-09-10', loss: true });
+expect('场景14 更近高买被配', r14.lots.get(trades14[1].id).matchedQty, 200);
+expect('场景14 更贵买不配', r14.lots.get(trades14[0].id).remainingQty, 500);
+expect('场景14 卖出全配', r14.sells.get(trades14[2].id).matchedQty, 200);
+expect('场景14 毛利为负', r14.sells.get(trades14[2].id).grossPnl, -20);
+
+// 场景15：低买高卖模式下不配卖亏
+const r15 = computeStairsMatches(trades14, { fromDate: '2026-09-10' });
+expect('场景15 低买高卖不配卖亏', r15.sells.get(trades14[2].id).matchedQty, 0);
+
 console.log(failed ? `\n${failed} 项失败` : '\n全部通过');
 process.exit(failed ? 1 : 0);

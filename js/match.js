@@ -259,7 +259,7 @@ function pickClosestBuy(sellPrice, candidates, lots) {
   return bestBelow || bestAbove;
 }
 
-/** 只配买价严格低于卖价的买单。不限买卖先后。数量拆单与价格最相近相同 */
+/** 只配买价严格低于卖价的买单。不限买卖先后。取低于卖价里最高的买（利润最大） */
 function pickClosestBuyBelow(sell, candidates, lots) {
   let best = null;
   for (const b of candidates) {
@@ -274,12 +274,29 @@ function pickClosestBuyBelow(sell, candidates, lots) {
   return best;
 }
 
+/** 只配买价严格高于卖价的买单。不限买卖先后。取高于卖价里最低的买（亏损最小） */
+function pickClosestBuyAbove(sell, candidates, lots) {
+  let best = null;
+  for (const b of candidates) {
+    const lot = lots.get(b.id);
+    if (!lot || lot.remainingQty <= 0) continue;
+    if (!(b.price > sell.price)) continue;
+    if (!best || b.price < best.price ||
+        (b.price === best.price && tradeTimeKey(b) < tradeTimeKey(best))) {
+      best = b;
+    }
+  }
+  return best;
+}
+
 /**
  * 老太太扶楼梯：只在 fromDate 起的窗口内撮合（空窗口=全部成交）。
- * 卖出仅消化卖价高于买价的买单，按量拆单，不限买卖先后；窗口外成交不参与。
+ * 默认低买高卖（卖价>买价）；opts.loss=true 时改为高买低卖（卖价<买价）。
+ * 按量拆单，不限买卖先后；窗口外成交不参与。
  */
 function computeStairsMatches(trades, opts) {
   const fromDate = opts && opts.fromDate ? String(opts.fromDate) : '';
+  const loss = !!(opts && opts.loss);
   const lots = new Map();
   const sells = new Map();
   const buysByCode = new Map();
@@ -308,7 +325,9 @@ function computeStairsMatches(trades, opts) {
     let remaining = sell.qty;
 
     while (remaining > 0) {
-      const pick = pickClosestBuyBelow(sell, candidates, lots);
+      const pick = loss
+        ? pickClosestBuyAbove(sell, candidates, lots)
+        : pickClosestBuyBelow(sell, candidates, lots);
       if (!pick) break;
       const lot = lots.get(pick.id);
       const q = Math.min(remaining, lot.remainingQty);
@@ -329,7 +348,7 @@ function computeStairsMatches(trades, opts) {
     sells.set(sell.id, finalizeSellResult(sell, r));
   }
 
-  return { lots, sells, pendingCovers: [], mode: 'stairs' };
+  return { lots, sells, pendingCovers: [], mode: loss ? 'stairs-loss' : 'stairs' };
 }
 
 function estimateLotProfit(buyTrade, remainingQty, estPrice, feeRules) {

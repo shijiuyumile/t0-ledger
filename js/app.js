@@ -9,6 +9,7 @@ let fullMatchResult = { lots: new Map(), sells: new Map() };
 let matchResult = { lots: new Map(), sells: new Map() };
 let timeMatchResult = { lots: new Map(), sells: new Map(), pendingCovers: [] };
 let stairsMatchResult = { lots: new Map(), sells: new Map(), pendingCovers: [] };
+let stairsLossMatchResult = { lots: new Map(), sells: new Map(), pendingCovers: [] };
 
 function todayISO() {
   const d = new Date();
@@ -90,6 +91,15 @@ function stairsWindowLabel() {
   return '近' + stairsDayCount() + '天';
 }
 
+/** 扶楼梯配对方向：profit=低买高卖（默认），loss=高买低卖 */
+function isStairsLossMode() {
+  return Store.settings.stairsPairMode === 'loss';
+}
+
+function currentStairsMatchResult() {
+  return isStairsLossMode() ? stairsLossMatchResult : stairsMatchResult;
+}
+
 function matchOpts(extra) {
   return Object.assign({ mode: currentMatchMode() }, extra || {});
 }
@@ -107,8 +117,13 @@ function recompute() {
     mode: 'time',
     fromDate: fromDate || undefined,
   });
+  const stairsFrom = resolveStairsFromDate();
   stairsMatchResult = computeStairsMatches(Store.trades, {
-    fromDate: resolveStairsFromDate(),
+    fromDate: stairsFrom,
+  });
+  stairsLossMatchResult = computeStairsMatches(Store.trades, {
+    fromDate: stairsFrom,
+    loss: true,
   });
 }
 
@@ -158,6 +173,7 @@ async function ensureSeed() {
       if (!Store.data.settings.ledgerPanel) Store.data.settings.ledgerPanel = 'lots';
       if (!Array.isArray(Store.data.settings.watchPrices)) Store.data.settings.watchPrices = [];
       if (!Store.data.settings.stairsDaysPreset) Store.data.settings.stairsDaysPreset = '7';
+      if (!Store.data.settings.stairsPairMode) Store.data.settings.stairsPairMode = 'profit';
       if (!(Number(Store.data.settings.stairsDays) > 0)) Store.data.settings.stairsDays = 7;
       if (!Array.isArray(Store.data.settings.codeOrder)) Store.data.settings.codeOrder = [];
       if (!Store.data.settings.codeOrderMode) Store.data.settings.codeOrderMode = 'custom';
@@ -606,7 +622,10 @@ function syncLedgerPanelUI() {
   if (stairsBox) stairsBox.hidden = panel !== 'stairs';
   if (lotBox) lotBox.hidden = panel !== 'lots';
   const hiddenLab = $('#showHiddenLabel');
-  if (hiddenLab) hiddenLab.textContent = panel === 'stairs' ? '显示已做T成功' : '显示已隐藏';
+  if (hiddenLab) {
+    if (panel !== 'stairs') hiddenLab.textContent = '显示已隐藏';
+    // stairs 文案由 syncStairsDaysUI 按低买高卖/高买低卖切换
+  }
   syncStairsDaysUI();
 }
 
@@ -805,8 +824,8 @@ function renderCoverAndWatch() {
         <summary>老太太扶楼梯怎么配？</summary>
         <ul>
           <li>只拿你选的统计周期里的买卖互配（可选全部成交），不跟周期外成交配对。</li>
-          <li>周期内同一标的，卖价高于买价即可按股数拆单，不限买卖先后。</li>
-          <li>窗口内配完的买入默认收起。打开「显示已做T成功」可看买价、卖价和扣费净利。</li>
+          <li><b>低买高卖</b>：卖价高于买价才配，按股数拆单，不限买卖先后。配完的买入可「显示已做T成功」查看净利。</li>
+          <li><b>高买低卖</b>：单独拉出卖价低于买价的配对，看卖亏明细和扣费净亏。两套账不要混加。</li>
         </ul>
       </details>`;
     } else {
@@ -823,6 +842,8 @@ function renderCoverAndWatch() {
 function syncStairsDaysUI() {
   const preset = String(Store.settings.stairsDaysPreset || '7');
   $$('#stairsDaysSeg button').forEach((b) => b.classList.toggle('active', b.dataset.days === preset));
+  const pair = isStairsLossMode() ? 'loss' : 'profit';
+  $$('#stairsPairSeg button').forEach((b) => b.classList.toggle('active', b.dataset.pair === pair));
   const days = stairsDayCount();
   const inp = $('#stairsDaysInput');
   if (inp && preset !== 'all' && String(inp.value) !== String(days)) inp.value = String(days);
@@ -833,22 +854,31 @@ function syncStairsDaysUI() {
   }
   const hint = $('#stairsHint');
   const fromDate = resolveStairsFromDate();
+  const winText = isStairsAll() ? '全部成交' : ('统计 ' + fromDate + ' 至今天');
   if (hint) {
-    hint.textContent = isStairsAll()
-      ? '全部成交：同一标的卖价高于买价即可按量拆单，不限买卖先后。'
-      : ('统计 ' + fromDate + ' 至今天：只在这段日期里低买高卖拆单，不限买卖先后。更早的成交不参与。');
+    hint.textContent = isStairsLossMode()
+      ? (winText + '：只拉出卖价低于买价的配对（高买低卖），按量拆单，不限先后。')
+      : (winText + '：卖价高于买价才配（低买高卖），按量拆单，不限先后。');
+  }
+  const hiddenLab = $('#showHiddenLabel');
+  if (hiddenLab) {
+    hiddenLab.textContent = isStairsLossMode() ? '显示未配到卖亏的买入' : '显示已做T成功';
   }
 }
 
-function stairsWindowNet() {
+function stairsWindowNet(mr) {
   let net = 0;
-  for (const r of stairsMatchResult.sells.values()) {
+  for (const r of (mr || currentStairsMatchResult()).sells.values()) {
     if (r && r.matchedQty > 0) net += r.netPnl;
   }
   return round2(net);
 }
 
 function renderStairsPanel() {
+  if (isStairsLossMode()) {
+    renderStairsLossPanel();
+    return;
+  }
   const box = $('#stairsList');
   if (!box) return;
   const showHidden = !!Store.settings.showHiddenLots;
@@ -891,7 +921,7 @@ function renderStairsPanel() {
   }
   const nEl = $('#panelCountStairs');
   if (nEl) nEl.textContent = remainLots ? String(remainLots) : '';
-  const winNet = stairsWindowNet();
+  const winNet = stairsWindowNet(stairsMatchResult);
   const sumEl = $('#ledgerSummary');
   if (sumEl) {
     sumEl.innerHTML = `
@@ -914,6 +944,99 @@ function renderStairsPanel() {
     return;
   }
 
+  renderStairsGroups(box, groups, codeCounts, {
+    showHidden,
+    pendingKey: '未做完',
+    doneKey: '做T成功',
+    qtyKey: '窗口待做T股数',
+    lossMode: false,
+  });
+}
+
+/** 高买低卖：只拉出卖价低于买价的已配对买入，便于单独看卖亏 */
+function renderStairsLossPanel() {
+  const box = $('#stairsList');
+  if (!box) return;
+  const showHidden = !!Store.settings.showHiddenLots;
+  const fromDate = resolveStairsFromDate();
+  const daysLabel = stairsWindowLabel();
+  const mr = stairsLossMatchResult;
+  const groups = new Map();
+  const codeCounts = new Map();
+  let lossLots = 0;
+  let lossQty = 0;
+  let untouched = 0;
+  const bump = (code) => {
+    if (!codeCounts.has(code)) codeCounts.set(code, { pending: 0, success: 0, hiddenManual: 0 });
+    return codeCounts.get(code);
+  };
+  for (const t of Store.trades) {
+    if (t.side !== 'buy') continue;
+    if (fromDate && t.date < fromDate) continue;
+    const lot = mr.lots.get(t.id);
+    if (!lot) continue;
+    const hasLoss = lot.matchedQty > 0;
+    const untouchedBuy = lot.matchedQty <= 0 && lot.remainingQty > 0;
+    if (!hasLoss && !untouchedBuy) continue;
+    const c = bump(t.code);
+    if (hasLoss) {
+      lossLots++;
+      lossQty += lot.matchedQty;
+      c.success++;
+      if (!groups.has(t.code)) groups.set(t.code, []);
+      groups.get(t.code).push({
+        trade: t,
+        remainingQty: lot.remainingQty,
+        done: lot.remainingQty <= 0,
+        loss: true,
+      });
+    } else if (showHidden) {
+      untouched++;
+      c.pending++;
+      if (!groups.has(t.code)) groups.set(t.code, []);
+      groups.get(t.code).push({
+        trade: t,
+        remainingQty: lot.remainingQty,
+        done: false,
+        loss: false,
+      });
+    } else {
+      untouched++;
+      c.pending++;
+    }
+  }
+  const nEl = $('#panelCountStairs');
+  if (nEl) nEl.textContent = lossLots ? String(lossLots) : '';
+  const winNet = stairsWindowNet(mr);
+  const sumEl = $('#ledgerSummary');
+  if (sumEl) {
+    sumEl.innerHTML = `
+    <div class="sum-item"><div class="v ${pnlClass(winNet)}">${fmtSign(winNet)}</div><div class="k">${daysLabel}卖亏扣费净利</div></div>
+    <div class="sum-item"><div class="v">${lossLots}</div><div class="k">高买低卖买入</div></div>
+    <div class="sum-item"><div class="v">${fmt(lossQty, 0)}</div><div class="k">卖亏股数</div></div>`;
+  }
+  const showHiddenEl = $('#showHiddenLots');
+  if (showHiddenEl) showHiddenEl.checked = showHidden;
+
+  if (!groups.size) {
+    box.innerHTML = untouched && !showHidden
+      ? `<div class="empty">${daysLabel}没有卖价低于买价的配对<br>另有 ${untouched} 笔买入未配到更低卖出，可打开「显示未配到卖亏的买入」</div>`
+      : `<div class="empty">${daysLabel}${fromDate ? '（自 ' + esc(fromDate) + '）' : ''}没有高买低卖配对<br>周期内没有卖价低于买价的可配成交</div>`;
+    return;
+  }
+
+  renderStairsGroups(box, groups, codeCounts, {
+    showHidden,
+    pendingKey: '未配卖亏',
+    doneKey: '已卖亏配对',
+    qtyKey: '卖亏已配股数',
+    lossMode: true,
+  });
+}
+
+function renderStairsGroups(box, groups, codeCounts, opts) {
+  const showHidden = !!opts.showHidden;
+  const lossMode = !!opts.lossMode;
   const codes = sortCodes(groups.keys());
   const html = [];
   codes.forEach((code, idx) => {
@@ -924,12 +1047,19 @@ function renderStairsPanel() {
     const typeCls = 'group-' + secType;
     const altCls = 'group-i' + (idx % 2);
     const counts = codeCounts.get(code) || { pending: 0, success: 0, hiddenManual: 0 };
-    const pendingN = counts.pending;
-    const doneN = counts.success;
-    const pendingQty = arr.reduce((s, x) => s + (x.done ? 0 : x.remainingQty), 0);
-    const metaBits = [`${pendingN}笔未做完`];
-    if (doneN) metaBits.push(`${doneN}笔做T成功`);
-    if (!showHidden && counts.hiddenManual) metaBits.push(`手动隐${counts.hiddenManual}`);
+    const metaBits = [];
+    if (lossMode) {
+      if (counts.success) metaBits.push(`${counts.success}笔${opts.doneKey}`);
+      if (showHidden && counts.pending) metaBits.push(`${counts.pending}笔${opts.pendingKey}`);
+      if (!metaBits.length) metaBits.push(`${arr.length}笔`);
+    } else {
+      metaBits.push(`${counts.pending}笔${opts.pendingKey}`);
+      if (counts.success) metaBits.push(`${counts.success}笔${opts.doneKey}`);
+      if (!showHidden && counts.hiddenManual) metaBits.push(`手动隐${counts.hiddenManual}`);
+    }
+    const qtyVal = lossMode
+      ? arr.reduce((s, x) => s + ((x.trade.qty || 0) - (x.remainingQty || 0)), 0)
+      : arr.reduce((s, x) => s + (x.done ? 0 : x.remainingQty), 0);
     html.push(`<div class="group ${altCls} ${typeCls}${open}" data-code="${esc(code)}">
       <div class="group-head">
         <div class="group-head-top">
@@ -943,11 +1073,13 @@ function renderStairsPanel() {
         <div class="group-stats">
           <div class="gs"><div class="v">${fmt(st.holdQty, 0)}</div><div class="k">持仓总量</div></div>
           <div class="gs"><div class="v">${st.avgCost ? fmt(st.avgCost, 3) : '--'}</div><div class="k">成本价</div></div>
-          <div class="gs"><div class="v">${fmt(pendingQty, 0)}</div><div class="k">窗口待做T股数</div></div>
+          <div class="gs"><div class="v">${fmt(qtyVal, 0)}</div><div class="k">${opts.qtyKey}</div></div>
         </div>
       </div>
       <div class="group-body">
-        ${arr.map(({ trade, remainingQty, done }) => renderLot(trade, remainingQty, { done })).join('')}
+        ${arr.map(({ trade, remainingQty, done, loss }) =>
+          renderLot(trade, remainingQty, { done: !!done, loss: !!(lossMode && (loss || done || remainingQty < trade.qty)) })
+        ).join('')}
       </div>
     </div>`);
   });
@@ -969,11 +1101,11 @@ function renderStairsPanel() {
       const price = parseFloat(inp.value) || null;
       Store.updateTrade(id, { estSell: price });
       const t = Store.trades.find((x) => x.id === id);
-      const lot = t ? stairsMatchResult.lots.get(id) : null;
+      const lot = t ? currentStairsMatchResult().lots.get(id) : null;
       updateEstOut(inp.closest('.lot-est'), t, lot ? lot.remainingQty : 0);
     });
     const t = Store.trades.find((x) => x.id === inp.dataset.id);
-    const lot = t ? stairsMatchResult.lots.get(t.id) : null;
+    const lot = t ? currentStairsMatchResult().lots.get(t.id) : null;
     if (t && lot) updateEstOut(inp.closest('.lot-est'), t, lot.remainingQty);
   });
 }
@@ -1168,7 +1300,7 @@ function renderLedger() {
 }
 
 function lotForRender(t) {
-  if (currentLedgerPanel() === 'stairs') return stairsMatchResult.lots.get(t.id);
+  if (currentLedgerPanel() === 'stairs') return currentStairsMatchResult().lots.get(t.id);
   return matchForCode(t.code).lots.get(t.id);
 }
 
@@ -1206,7 +1338,7 @@ function lotMatchedSummary(t, lot) {
 function hiddenLotTallyHtml(t, remainingQty, opts) {
   const sum = lotMatchedSummary(t, lotForRender(t));
   const stairsMatched = currentLedgerPanel() === 'stairs' && sum.matchedQty > 0;
-  const force = !!(opts && opts.done);
+  const force = !!(opts && (opts.done || opts.loss));
   if (!t.tHidden && !force && !stairsMatched) {
     return '';
   }
@@ -1223,16 +1355,18 @@ function hiddenLotTallyHtml(t, remainingQty, opts) {
   const avg = sum.lines.length > 1 ? ` · 均价 ${fmt(sum.avgSell, 3)}` : '';
   const left = remainingQty > 0
     ? `<div class="hint-inline">还剩 ${fmt(remainingQty, 0)}股未配完</div>` : '';
+  const netLabel = (opts && opts.loss) || sum.net < 0 ? '扣费后净亏' : '扣费后净利';
   return `<div class="lot-tally">
     <div>买入 ${fmt(t.price, 3)} × ${fmt(sum.matchedQty, 0)}股</div>
     <div>卖出 ${sellText}${avg}</div>
-    <div class="lot-tally-net ${pnlClass(sum.net)}">扣费后净利 ${fmtSign(sum.net)}</div>
+    <div class="lot-tally-net ${pnlClass(sum.net)}">${netLabel} ${fmtSign(sum.net)}</div>
     ${left}
   </div>`;
 }
 
 function renderLot(t, remainingQty, opts) {
   const done = !!(opts && opts.done);
+  const loss = !!(opts && opts.loss);
   const partly = remainingQty < t.qty && remainingQty > 0
     ? `（原${fmt(t.qty, 0)}股，已配对${fmt(t.qty - remainingQty, 0)}）`
     : '';
@@ -1248,13 +1382,17 @@ function renderLot(t, remainingQty, opts) {
   const hideBtn = done
     ? ''
     : `<button class="btn btn-mini btn-hide" data-act="toggle-hide" data-id="${t.id}">${hidden ? '取消隐藏' : '已做T隐藏'}</button>`;
-  return `<div class="lot${done ? ' lot-done' : (hidden ? ' lot-hidden' : '')}">
+  let lotCls = '';
+  if (loss && (done || remainingQty < t.qty)) lotCls = ' lot-loss';
+  else if (done) lotCls = ' lot-done';
+  else if (hidden) lotCls = ' lot-hidden';
+  return `<div class="lot${lotCls}">
     <div class="lot-top">
       <span class="lot-price">${fmt(t.price, 3)}</span>
       <span class="lot-qty">${qtyText}</span>
       <span class="lot-date">${esc(t.date)} ${esc(t.time || '')}</span>
     </div>
-    ${hiddenLotTallyHtml(t, remainingQty, { done })}
+    ${hiddenLotTallyHtml(t, remainingQty, { done, loss })}
     <div class="lot-fees">买入费用：${feeText(t.fees)}${t.feeSource === 'statement' ? '（交割单）' : '（按费率估算）'}</div>
     ${estHtml}
     <div class="lot-actions">
@@ -1540,6 +1678,13 @@ $$('#ledgerMatchModeSeg button').forEach((b) => {
 $$('#ledgerPanelSeg button').forEach((b) => {
   b.addEventListener('click', () => {
     Store.settings.ledgerPanel = b.dataset.panel;
+    Store.save();
+    renderAll();
+  });
+});
+$$('#stairsPairSeg button').forEach((b) => {
+  b.addEventListener('click', () => {
+    Store.settings.stairsPairMode = b.dataset.pair === 'loss' ? 'loss' : 'profit';
     Store.save();
     renderAll();
   });
