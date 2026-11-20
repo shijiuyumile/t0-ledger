@@ -3,6 +3,22 @@
 > **给其他 AI / 换助手时**：请先阅读 [`AI-HANDOFF.md`](./AI-HANDOFF.md)。  
 > 日常「更新对账单数据」的完整步骤、仓库地址、手机同步原理都写在那里。
 
+> ## ⚠️ 开工第一件事（所有助手必读，违反会算错账）
+>
+> 本项目会由多个 AI 工具**接力**维护（WorkBuddy / Cursor / GrokBot 等，今天用这个明天用那个），
+> 仓库 `main` 分支是唯一真相源。**在合并任何对账单之前，必须先执行 Step 0 同步检查**：
+>
+> ```bash
+> git fetch origin
+> git log --oneline HEAD..origin/main    # 有输出 = 别人已先行更新，必须先同步
+> ```
+>
+> - 若远端领先：先 `git pull --ff-only` 同步到最新，再往下做。
+> - 绝不可在未同步的情况下直接 merge，否则同一份账单会被重复合并，导致**银证入金/股息重复累加、账户盈亏算错**。
+> - 绝不可 force push。push 被拒就说明该同步了。
+>
+> 详见 [`AI-HANDOFF.md`](./AI-HANDOFF.md) 第 4 节 Step 0。
+
 A 股散户做 T+0 的「买入成本台账」手机应用（PWA）。
 
 - **线上地址（固定，无需重装）**：https://shijiuyumile.github.io/t0-ledger/
@@ -12,6 +28,9 @@ A 股散户做 T+0 的「买入成本台账」手机应用（PWA）。
 
 ```bash
 cd "D:\我的cursor项目文件\t0-ledger"
+# Step 0（必做）：同步远端，确认别人没有先行更新
+git fetch origin && git log --oneline HEAD..origin/main
+# 若上面有输出 → 先 git pull --ff-only 同步，再继续下面步骤
 node tools/merge-xlsx.js "对账单.xlsx的完整路径"
 node tools/export-todo-xlsx.js
 # 然后把 sw.js 中 CACHE_VERSION +1，git add/commit/push origin main

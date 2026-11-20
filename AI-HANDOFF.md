@@ -123,6 +123,22 @@ t0-ledger/
 
 `d:\小龙虾的文件夹\做T数据记录\普通账户电子对账单(YYYYMMDD).xlsx`
 
+### Step 0 — 开工前同步检查（★ 强制，不可跳过）
+
+本项目由多个 AI 工具**接力维护**（WorkBuddy / Cursor / GrokBot，今天用这个明天用那个）。
+GitHub `main` 分支是唯一真相源，本地副本可能已落后。**任何 merge 之前必须先做同步检查**：
+
+```bash
+cd "D:\我的cursor项目文件\t0-ledger"
+git fetch origin
+git log --oneline HEAD..origin/main
+```
+
+- 若 `git log HEAD..origin/main` **有输出**：说明别的工具已先行合并过新数据。必须先 `git pull --ff-only` 同步到最新，再执行下面的步骤。
+- 若**无输出**：本地已是最新，可继续。
+- ⚠ 绝不可在未同步的情况下直接 merge：同一份 xlsx 重复合并会让**银证转入转出、股息、利息重复累加**，账户盈亏算错（成交虽按 key 去重，但这些累计字段不会）。
+- ⚠ push 被拒（non-fast-forward）就是没先同步的信号：正确做法是 `git pull --ff-only` 后重试，**绝不可 force push**。
+
 ### 标准步骤（按顺序执行）
 
 ```bash
